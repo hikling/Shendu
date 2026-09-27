@@ -23,6 +23,8 @@
 
 ## Debian 12 / 13 部署
 
+以下服务器命令需要在 **root 账户**执行。若当前不是 root，请先单独执行 `su -`，进入 root 后再复制后续命令；Debian 精简系统可能没有安装 `sudo`，所以本文不依赖 `sudo`。
+
 ### 1. 从 GitHub 下载
 
 ```bash
@@ -36,8 +38,8 @@ cd /opt/Shendu/shendu
 ### 2. 安装 Docker 并生成配置
 
 ```bash
-chmod +x scripts/install.sh scripts/site-backup.sh
-sudo sh scripts/install.sh
+chmod +x scripts/install.sh scripts/update.sh scripts/site-backup.sh
+sh scripts/install.sh
 ```
 
 编辑 `.env`：
@@ -75,46 +77,135 @@ docker compose logs -f --tail=100
 
 ## 服务器更新已有部署
 
-以下步骤适用于按上文从 GitHub 克隆到 `/opt/Shendu` 的服务器。日常更新不需要重新运行 `scripts/install.sh`，也不要删除 `.env`、`shendu/data/` 或其中的 `backup-master.key`。
+更新前，建议先用超级管理员在网页“数据备份”中导出一份 `.shendu-site` 整站加密备份。更新过程中绝对不要删除或替换 `.env`、`data/` 和 `data/backup-master.key`。
 
-### 1. 更新前备份并检查工作区
+### 1. 先确认是不是 Git 部署
 
-建议先用超级管理员在网页“数据备份”中导出一份整站加密备份，再在服务器执行：
+在 root 账户执行：
 
 ```bash
-cd /opt/Shendu
-git status --short
+if [ -d /opt/Shendu/.git ]; then
+  echo "Git 部署，可以直接更新"
+else
+  echo "不是 Git 部署，不能使用 git pull"
+fi
 ```
 
-正常情况下不会输出内容。如果显示被修改的受版本控制文件，先保存或处理这些改动，不要直接覆盖；`.env`、`data/` 和 `tmp/` 属于本机数据，不会被普通 `git pull` 更新。
+只有显示“Git 部署，可以直接更新”时，才继续下一步。如果项目不在 `/opt/Shendu`，请把后续命令中的路径替换成实际的 **仓库根目录**；仓库根目录应同时包含 `README.md` 和 `shendu/`。
 
-### 2. 拉取代码并重建容器
+### 2. 第一次使用新版更新脚本
+
+旧版本还没有 `scripts/update.sh` 时，直接从 GitHub 下载最新版更新脚本：
 
 ```bash
-cd /opt/Shendu
-git pull --ff-only
-cd shendu
-docker compose up -d --build --remove-orphans
+apt-get update
+apt-get install -y ca-certificates curl
+curl -fL https://raw.githubusercontent.com/hikling/Shendu/main/shendu/scripts/update.sh \
+  -o /tmp/shendu-update.sh
+chmod 700 /tmp/shendu-update.sh
+sh /tmp/shendu-update.sh /opt/Shendu
 ```
 
-这会保留现有数据库、主密钥和站点配置，只替换应用镜像并完成必要的数据迁移。
+脚本会自动完成以下检查和操作：
 
-### 3. 检查更新结果
+- 不依赖 Git 是否设置了上游分支，直接获取 `origin/main`
+- 自动处理 Git 的 `safe.directory` 检查
+- 检查当前分支、受版本控制文件和 `.env`，发现风险立即停止，不强行覆盖
+- 先构建新镜像，构建失败时不动正在运行的网站
+- 先单独启动 `shendu` 并等待健康检查，再启动 Caddy，避免 `dependency shendu failed to start`
+- 保留 `.env`、数据库、内部主密钥、Caddy 证书和全部用户资料
+
+### 3. 以后更新只需要一条命令
 
 ```bash
+sh /opt/Shendu/shendu/scripts/update.sh
+```
+
+无论当前位于哪个目录都可以执行。如果仓库不在 `/opt/Shendu`，也可以明确传入仓库根目录：
+
+```bash
+sh /实际路径/shendu/scripts/update.sh /实际路径
+```
+
+### 4. 更新后检查
+
+```bash
+cd /opt/Shendu/shendu
 docker compose ps
-docker compose logs --tail=100 shendu
 curl -fsS https://你的域名/healthz
 ```
 
-健康检查应返回包含 `"ok":true` 的 JSON。若服务没有正常启动，继续查看：
+健康检查应返回包含 `"ok":true` 的 JSON。浏览器仍显示旧界面时，Windows 使用 `Ctrl + F5`；手机浏览器清除本站缓存后重新打开。
+
+### 5. 常见错误
+
+#### 显示“不是 Git 克隆目录”或 `not a git repository`
+
+说明服务器上运行的是以前上传的 ZIP 解压版，ZIP 中没有 `.git`，因此任何 `git pull` 命令都不可能成功。请按下一节“ZIP 旧部署迁移”处理。
+
+#### 显示“受版本控制文件被修改”
+
+执行下面的命令查看改动：
 
 ```bash
+git -c safe.directory=/opt/Shendu -C /opt/Shendu status --short
+```
+
+先备份并确认这些修改是否需要保留。更新脚本不会使用 `git reset --hard`，也不会擅自覆盖服务器上的改动。
+
+#### 显示 Docker 未启动
+
+```bash
+systemctl enable --now docker
+sh /opt/Shendu/shendu/scripts/update.sh
+```
+
+#### 容器没有通过健康检查
+
+更新脚本会自动打印应用日志，也可以手动查看：
+
+```bash
+cd /opt/Shendu/shendu
 docker compose logs --tail=200 shendu
 docker compose logs --tail=200 caddy
 ```
 
-如果浏览器仍显示旧界面，先强制刷新页面并清理该站点缓存。安装目录不是 `/opt/Shendu` 时，请在项目目录执行 `git rev-parse --show-toplevel` 查出仓库根目录，再按相同步骤更新。
+## ZIP 旧部署迁移为 Git 部署
+
+ZIP 解压版不能原地执行 `git pull`。最安全的方法是使用网页整站备份迁移，并保留旧目录作为回退：
+
+1. 在旧站使用超级管理员导出 `.shendu-site` 整站加密备份，并保存好备份密码。
+2. 在旧项目中执行 `docker compose down`。执行前必须先 `cd` 到能看到旧站 `compose.yaml` 的目录。
+3. 保留旧目录并重新克隆：
+
+```bash
+cd /opt
+shendu_old_dir="/opt/Shendu-zip-old-$(date +%Y%m%d-%H%M%S)"
+mv /opt/Shendu "$shendu_old_dir"
+echo "旧站已保留在：$shendu_old_dir"
+git clone https://github.com/hikling/Shendu.git /opt/Shendu
+cd /opt/Shendu/shendu
+sh scripts/install.sh
+```
+
+4. 把新站 `.env` 中的 `SHENDU_DOMAIN` 改成原来的域名：
+
+```bash
+nano /opt/Shendu/shendu/.env
+```
+
+5. 启动新站：
+
+```bash
+cd /opt/Shendu/shendu
+docker compose up -d --build
+docker compose ps
+```
+
+6. 打开网站，创建一个临时超级管理员，然后在“数据备份”中恢复 `.shendu-site`。
+7. 确认原账户、复盘、设置和备份目标全部正常后，再自行处理刚才命令显示的旧站目录；确认前不要删除旧目录。
+
+如果旧项目目录本来不叫 `/opt/Shendu`，只替换上面命令中的旧目录路径，新 Git 部署仍建议固定为 `/opt/Shendu`。
 
 ## Cloudflare 域名设置
 

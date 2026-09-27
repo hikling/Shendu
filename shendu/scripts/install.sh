@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "请使用 root 执行：sudo sh scripts/install.sh"
+  echo "请先执行 su - 进入 root 账户，再运行：sh scripts/install.sh"
   exit 1
 fi
 
