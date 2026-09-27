@@ -38,7 +38,9 @@ trap 'exit 130' HUP INT TERM
 
 app_dir="$repo_dir/shendu"
 git_in_repo() {
-  git -c safe.directory="$repo_dir" -C "$repo_dir" "$@"
+  # 旧版安装文档要求 chmod +x，部分服务器因此只有脚本权限位发生变化。
+  # 部署更新只比较文件内容，忽略 chmod 产生的权限差异。
+  git -c safe.directory="$repo_dir" -c core.fileMode=false -C "$repo_dir" "$@"
 }
 
 command -v git >/dev/null 2>&1 || fail "服务器没有安装 git。请先执行：apt update && apt install -y git"
@@ -51,7 +53,7 @@ branch="$(git_in_repo symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 
 if ! git_in_repo diff --quiet || ! git_in_repo diff --cached --quiet; then
   git_in_repo status --short >&2
-  fail "检测到受版本控制文件被修改。请先备份并处理这些改动，脚本不会强行覆盖。"
+  fail "检测到受版本控制文件的内容被修改。上方已列出文件；请按 README 的“服务器存在本地代码修改”处理。"
 fi
 
 if [ ! -f "$app_dir/data/backup-master.key" ]; then

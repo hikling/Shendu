@@ -38,7 +38,6 @@ cd /opt/Shendu/shendu
 ### 2. 安装 Docker 并生成配置
 
 ```bash
-chmod +x scripts/install.sh scripts/update.sh scripts/site-backup.sh
 sh scripts/install.sh
 ```
 
@@ -145,13 +144,16 @@ curl -fsS https://你的域名/healthz
 
 #### 显示“受版本控制文件被修改”
 
-执行下面的命令查看改动：
+新版更新脚本会自动忽略旧安装命令造成的 `chmod +x` 权限变化。如果仍然出现这个错误，说明服务器上的代码内容确实被改过。执行下面的命令查看改动：
 
 ```bash
-git -c safe.directory=/opt/Shendu -C /opt/Shendu status --short
+git -c safe.directory=/opt/Shendu -c core.fileMode=false \
+  -C /opt/Shendu status --short
+git -c safe.directory=/opt/Shendu -c core.fileMode=false \
+  -C /opt/Shendu diff --stat
 ```
 
-先备份并确认这些修改是否需要保留。更新脚本不会使用 `git reset --hard`，也不会擅自覆盖服务器上的改动。
+先备份并确认这些代码修改是否需要保留。更新脚本不会使用 `git reset --hard`，也不会擅自覆盖真实的代码内容。
 
 #### 显示 Docker 未启动
 
