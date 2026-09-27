@@ -1234,7 +1234,7 @@ async function api(req, res, url) {
     try { const parsed=parseBackupBuffer(readFileSync(file),password); assertBackupOwner(user,parsed,body.sourceUsername); const count=applyBackup(user.id,parsed,body.mode==='replace'?'replace':'merge'); unlinkSync(file); return json(res,200,{ok:true,count}); } catch(e){return error(res,e.status||400,e.message,e.code||'backup_import_failed')}
   }
   if (path === '/api/backup/targets' && method === 'GET') {
-    const targets=db.prepare(`SELECT id,name,kind,schedule,enabled,last_run_at,last_success_at,last_error,created_at FROM backup_targets WHERE user_id=? ORDER BY created_at DESC`).all(user.id); const runs=db.prepare(`SELECT * FROM backup_runs WHERE user_id=? ORDER BY created_at DESC LIMIT 12`).all(user.id); return json(res,200,{targets,runs});
+    const targets=db.prepare(`SELECT id,name,kind,schedule,enabled,last_run_at,last_success_at,last_error,created_at FROM backup_targets WHERE user_id=? ORDER BY created_at DESC`).all(user.id); const runs=db.prepare(`SELECT * FROM backup_runs WHERE user_id=? AND message!='连接测试成功' ORDER BY created_at DESC LIMIT 10`).all(user.id); return json(res,200,{targets,runs});
   }
   if (path === '/api/backup/targets' && method === 'POST') {
     const body=await readJson(req); if(!['webdav','s3'].includes(body.kind))return error(res,400,'目标类型不正确'); if(db.prepare(`SELECT COUNT(*) AS n FROM backup_targets WHERE user_id=?`).get(user.id).n>=8)return error(res,400,'最多设置 8 个外部目标');
@@ -1254,8 +1254,8 @@ async function api(req, res, url) {
   if (/^\/api\/backup\/targets\/[^/]+$/.test(path) && method === 'DELETE') { const id=path.split('/')[4]; db.prepare(`DELETE FROM backup_targets WHERE id=? AND user_id=?`).run(id,user.id); return json(res,200,{ok:true}); }
   if (/^\/api\/backup\/targets\/[^/]+\/(test|run)$/.test(path) && method === 'POST') {
     const [,,, ,id,action]=path.split('/'); const target=db.prepare(`SELECT * FROM backup_targets WHERE id=? AND user_id=?`).get(id,user.id); if(!target)return error(res,404,'备份目标不存在');
-    try { await runExternalBackup(target,action==='test'); if(!saveBackupOutcome(target,'success',action==='test'?'连接测试成功':'备份成功'))return error(res,409,'备份目标已被删除'); return json(res,200,{ok:true}); }
-    catch(e){saveBackupOutcome(target,'error',e.message);return error(res,400,e.message)}
+    try { await runExternalBackup(target,action==='test'); if(action==='run'&&!saveBackupOutcome(target,'success','备份成功'))return error(res,409,'备份目标已被删除'); return json(res,200,{ok:true}); }
+    catch(e){if(action==='run')saveBackupOutcome(target,'error',e.message);return error(res,400,e.message)}
   }
   if (path === '/api/admin/users' && method === 'GET') {
     if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const q=safeText(url.searchParams.get('q')||'',100); return json(res,200,{users:db.prepare(`SELECT id,username,display_name,role,status,created_at FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY created_at DESC`).all(`%${q}%`,`%${q}%`).map(cleanUser),registrationOpen:db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get().value==='true'});
