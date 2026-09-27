@@ -23,13 +23,15 @@
 
 ## Debian 12 / 13 部署
 
-### 1. 上传并解压
+### 1. 从 GitHub 下载
 
 ```bash
-apt update && apt install -y unzip
-unzip shendu-debian-reference-ui-v5.3.0.zip -d /opt/shendu
-cd /opt/shendu
+apt update && apt install -y git
+git clone https://github.com/hikling/Shendu.git /opt/Shendu
+cd /opt/Shendu/shendu
 ```
+
+如果已经克隆过项目，先执行 `cd /opt/Shendu/shendu`，确认当前目录里能看到 `.env.example`、`compose.yaml` 和 `scripts/`，再继续安装。
 
 ### 2. 安装 Docker 并生成配置
 
@@ -74,6 +76,9 @@ docker compose logs -f --tail=100
 更新代码后：
 
 ```bash
+cd /opt/Shendu
+git pull --ff-only
+cd shendu
 docker compose up -d --build
 ```
 

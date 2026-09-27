@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+data/*
+!data/.gitkeep
+tmp/*
+!tmp/.gitkeep
+backups/
+*.log
+*.zip
+*.shendu
+*.shendu-db

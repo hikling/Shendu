@@ -6,6 +6,15 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+app_dir="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+cd "$app_dir"
+
+if [ ! -f .env.example ]; then
+  echo "缺少 $app_dir/.env.example，请重新拉取完整项目后再执行安装。"
+  exit 1
+fi
+
 apt-get update
 apt-get install -y ca-certificates curl gnupg openssl
 install -m 0755 -d /etc/apt/keyrings
