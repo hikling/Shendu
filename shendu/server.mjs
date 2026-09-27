@@ -314,6 +314,30 @@ const putSetting = (userId, key, value) => {
   const stored = key === 'backup_secret' ? JSON.stringify(value) : encryptData(value, dataScope('setting', userId, key));
   return db.prepare(`INSERT INTO user_settings(user_id,key,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(userId, key, stored, now());
 };
+const REVIEW_TEMPLATE_DEFAULTS = {
+  daily:{today:'今天，哪件事最值得记下来？',cause:'是什么让它发生？',actionTitle:'明天最重要的一件事',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期何时验证？'},
+  weekly:{plan:'这周原本要完成什么？实际呢？',progress:'本周最有价值的三个进展',patterns:'反复出现的成功条件与阻碍',keepStop:'下周保留一件事，停止一件事',nextThree:'下周最重要的三件事',actionTitle:'接下来，具体要做什么？',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期什么时候验证？'},
+  monthly:{goalResult:'月初的目标与现在的结果',change:'哪个变化真正改善了生活？',want:'这些目标，仍然是我想要的吗？',bottleneck:'下个月只主攻哪一个瓶颈？',experiment:'一个小实验：假设、做法、成功标准',actionTitle:'接下来，具体要做什么？',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期什么时候验证？'},
+  quarterly:{hope:'这一阶段原本希望生活发生什么变化？',evidence:'90 天后，哪些变化有证据？',worth:'目标值得继续吗？付出的代价能接受吗？',choices:'继续、调整、停止：分别是什么？',nextGoals:'下一阶段最多三个目标',actionTitle:'接下来，具体要做什么？',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期什么时候验证？'},
+  yearly:{coordinates:'用五件事，留下这一年的坐标',expectations:'年初的期待，哪些成为了现实？',areas:'人生几个重要领域，分别发生了什么？',decisions:'最重要的决定，现在怎么看？',keepRelease:'我想保留什么，又该放下什么？',nextYear:'明年的主题与最多三个目标',actionTitle:'接下来，具体要做什么？',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期什么时候验证？'},
+  decision:{recordTitle:'决定的名字',decision:'我正在做什么决定？为什么现在要做？',options:'有哪些选项？包括维持现状',facts:'我现在掌握哪些事实？哪些仍未知？',expectation:'预期结果、概率与出现的时间',failure:'如果决定失败，最可能因为什么？',choice:'最终选择与理由',firstStep:'决定后的第一步行动',actionTitle:'接下来，具体要做什么？',obstacleTitle:'如果遇到阻碍，那么我就……',verifyDateTitle:'预期什么时候验证？'}
+};
+const ACTION_TEMPLATE_DEFAULTS = {
+  pageTitle:'行动验证',pageIntro:'预期验证日期和实际提交时间会同时保留，提前、按期或延后完成一眼可见。',historyButton:'查看全部历史',
+  pendingTitle:'等待验证',pendingIntro:'按预期日期排列，实际验证时间将在提交时自动记录。',pendingEmptyTitle:'没有等待验证的行动',pendingEmptyText:'完成一份复盘后，约定的行动会出现在这里。',
+  verifiedTitle:'已经验证',verifiedIntro:'保留预期与实际时间，便于以后判断是否提前完成。',verifiedEmptyTitle:'还没有已验证行动',verifiedEmptyText:'提交第一条验证结果后会显示在这里。',
+  waitingStatus:'等待验证',overdueStatus:'已过约定日期',todayStatus:'今天验证',verifiedStatus:'已验证',countUnit:'项',earlyTimingText:'提前 {days} 天完成',lateTimingText:'晚于预期 {days} 天完成',onTimeText:'按预期日期完成',
+  expectedDateLabel:'预期验证日期',actualDateLabel:'实际验证时间',expectedMissingText:'未设置',actualMissingText:'尚未验证',
+  agreementEyebrow:'行动约定',agreementTitle:'复盘时锁定的计划',agreementNote:'原始记录',originalActionTitle:'原定行动',planTitle:'如果—那么预案',
+  reviewEyebrow:'验证回看',reviewTitle:'实际结果与后续调整',reviewNote:'已永久锁定',resultTitle:'实际结果',adjustmentTitle:'保留或调整',
+  ifLabel:'如果',thenLabel:'那么',responseLabel:'应对',missingActionText:'未填写行动',missingPlanText:'未填写预案',missingResponseText:'未填写应对动作',missingResultText:'未填写',
+  submitActionButton:'提交验证结果',decisionActionButton:'进入结果后回看',viewRecordButton:'查看原复盘与验证结果',
+  modalTitle:'提交行动验证',decisionModalTitle:'结果后回看',modalIntro:'提交后，验证结果与实际提交时间都会永久锁定。',originalActionLabel:'原定行动',actualAutoText:'提交时自动记录（北京时间）',
+  resultPrompt:'实际发生了什么？与预期差在哪里？',outcomePrompt:'结果如何？',processPrompt:'当时的决策过程？',adjustmentPrompt:'我会保留、修正什么判断？',cancelButton:'取消',submitButton:'提交并锁定结果',
+  decisionOutcomeLabel:'结果',decisionProcessLabel:'过程',lockedTitle:'行动验证结果',lockedIntro:'结果、预期日期与实际提交时间均已锁定。',
+  lockedPendingTitle:'结果还没有验证',lockedPendingIntro:'无需等到当天；提前完成也可以直接提交，系统会记录实际验证时间。',lockedPendingButton:'填写行动验证'
+};
+const freshReviewTemplates = () => Object.fromEntries(Object.entries(REVIEW_TEMPLATE_DEFAULTS).map(([type,template])=>[type,{...template}]));
 const defaultStage = () => ({
   name: '稳住底盘', focus: '建立稳定的身体、行动与财务节奏', startDate: todayDate(), days: 90,
   sleepTarget: 7, energyTarget: 70, showQuarter: false,
@@ -321,7 +345,8 @@ const defaultStage = () => ({
     { name: '健身与身体执行', target: '训练日完成计划；休息日安排恢复' },
     { name: '收入能力行动', target: '专注 60 分钟，形成一个具体输出' },
     { name: '财务秩序', target: '完成记账；不新增非必要债务' }
-  ]
+  ],
+  reviewTemplates: freshReviewTemplates(), actionTemplate: {...ACTION_TEMPLATE_DEFAULTS}
 });
 const defaultTheme = () => ({ preset: '潮汐青', primary: '#176B67', secondary: '#A86436', tertiary: '#536C9C', reduceMotion: false });
 const recordOut = r => {
@@ -333,6 +358,34 @@ const recordOut = r => {
 };
 const safeText = (v, max = 6000) => typeof v === 'string' ? v.slice(0, max) : '';
 const validRecordType = t => ['daily','weekly','monthly','quarterly','yearly','decision'].includes(t);
+const isPlainObject = value => Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
+const templateText = (value,fallback,max=240) => safeText(value,max).trim()||fallback;
+const normalizeReviewTemplate = (type,value) => {
+  const defaults=REVIEW_TEMPLATE_DEFAULTS[type],source=isPlainObject(value)?value:{};
+  return Object.fromEntries(Object.entries(defaults).map(([key,fallback])=>[key,templateText(source[key],fallback,160)]));
+};
+const normalizeReviewTemplates = value => Object.fromEntries(Object.keys(REVIEW_TEMPLATE_DEFAULTS).map(type=>[type,normalizeReviewTemplate(type,isPlainObject(value)?value[type]:null)]));
+const normalizeActionTemplate = value => {
+  const source=isPlainObject(value)?value:{};
+  return Object.fromEntries(Object.entries(ACTION_TEMPLATE_DEFAULTS).map(([key,fallback])=>[key,templateText(source[key],fallback,240)]));
+};
+const normalizeStage = value => {
+  const defaults=defaultStage(),source=isPlainObject(value)?value:{},days=Number(source.days),sleep=Number(source.sleepTarget),energy=Number(source.energyTarget),metrics=Array.isArray(source.metrics)&&source.metrics.length===3?source.metrics:defaults.metrics;
+  return {
+    name:templateText(source.name,defaults.name,50),focus:templateText(source.focus,defaults.focus,300),
+    startDate:/^\d{4}-\d{2}-\d{2}$/.test(String(source.startDate||''))?source.startDate:defaults.startDate,
+    days:Number.isFinite(days)?Math.min(366,Math.max(7,Math.round(days))):defaults.days,
+    sleepTarget:Number.isFinite(sleep)?Math.min(24,Math.max(0,sleep)):defaults.sleepTarget,
+    energyTarget:Number.isFinite(energy)?Math.min(100,Math.max(0,energy)):defaults.energyTarget,
+    showQuarter:source.showQuarter===true,
+    metrics:metrics.map((metric,index)=>({name:templateText(metric?.name,defaults.metrics[index].name,80),target:templateText(metric?.target,defaults.metrics[index].target,240)})),
+    reviewTemplates:normalizeReviewTemplates(source.reviewTemplates),actionTemplate:normalizeActionTemplate(source.actionTemplate)
+  };
+};
+const normalizeTemplateSnapshot = (value,type) => {
+  if(!validRecordType(type)||!isPlainObject(value)||!isPlainObject(value.review)||!isPlainObject(value.action))return null;
+  return {version:1,review:normalizeReviewTemplate(type,value.review),action:normalizeActionTemplate(value.action)};
+};
 const validIsoDate = value => {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||'')))return false;
   const date=new Date(`${value}T00:00:00Z`);return Number.isFinite(date.valueOf())&&date.toISOString().slice(0,10)===value;
@@ -837,7 +890,7 @@ async function api(req, res, url) {
     setSessionCookie(res,'',0); return json(res,200,{ok:true});
   }
   const user = requireUser(req,res); if (!user) return;
-  if (path === '/api/me' && method === 'GET') return json(res,200,{ user:cleanUser(user), stage:setting(user.id,'stage',defaultStage()), theme:setting(user.id,'theme',defaultTheme()) });
+  if (path === '/api/me' && method === 'GET') return json(res,200,{ user:cleanUser(user), stage:normalizeStage(setting(user.id,'stage',defaultStage())), theme:setting(user.id,'theme',defaultTheme()) });
   if (path === '/api/me/password' && method === 'POST') {
     if (limited(req,'password',6,3600000)) return error(res,429,'尝试次数过多');
     const body=await readJson(req); if (!verifyPassword(body.currentPassword || '',user.password_hash)) return error(res,400,'当前密码不正确');
@@ -846,7 +899,7 @@ async function api(req, res, url) {
     db.prepare(`DELETE FROM sessions WHERE user_id=?`).run(user.id); setSessionCookie(res,'',0); return json(res,200,{ok:true,relogin:true});
   }
   if (path === '/api/settings' && method === 'PUT') {
-    const body=await readJson(req); if (body.stage) putSetting(user.id,'stage',body.stage); if (body.theme) putSetting(user.id,'theme',body.theme); return json(res,200,{ok:true});
+    const body=await readJson(req),response={ok:true}; if (body.stage){response.stage=normalizeStage(body.stage);putSetting(user.id,'stage',response.stage)} if (body.theme) putSetting(user.id,'theme',body.theme); return json(res,200,response);
   }
   if (path === '/api/stats' && method === 'GET') {
     const current = todayDate();
@@ -873,8 +926,9 @@ async function api(req, res, url) {
     const id=body.id||randomUUID(), existing=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id);
     if(existing&&existing.status!=='draft')return error(res,409,'已完成的记录不能修改','locked');
     if(existing&&Number(body.version)!==Number(existing.version))return error(res,409,'这条记录已在其他设备更新，请刷新后再继续','version_conflict');
-    const stamp=now(), version=existing?existing.version+1:1;
-    const data=encryptData(body.data||{},dataScope('record',user.id,id,'data')),title=encryptData(safeText(body.title||'',200),dataScope('record',user.id,id,'title'));
+    const stamp=now(), version=existing?existing.version+1:1,cleanData=isPlainObject(body.data)?body.data:{};
+    if('templateSnapshot' in cleanData){const snapshot=normalizeTemplateSnapshot(cleanData.templateSnapshot,body.type);if(snapshot)cleanData.templateSnapshot=snapshot;else delete cleanData.templateSnapshot}
+    const data=encryptData(cleanData,dataScope('record',user.id,id,'data')),title=encryptData(safeText(body.title||'',200),dataScope('record',user.id,id,'title'));
     if(existing)db.prepare(`UPDATE records SET type=?,period=?,title=?,data=?,version=?,updated_at=? WHERE id=? AND user_id=?`).run(body.type,body.period,title,data,version,stamp,id,user.id);
     else db.prepare(`INSERT INTO records(id,user_id,type,period,title,data,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,'draft',1,?,?)`).run(id,user.id,body.type,body.period,title,data,stamp,stamp);
     return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
@@ -884,7 +938,11 @@ async function api(req, res, url) {
     if(row.period!==currentPeriodFor(row.type))return error(res,400,currentPeriodMessage(row.type),'period_locked');
     const decoded=recordOut(row),data=decoded.data,required={daily:['today'],weekly:['plan','progress','nextThree'],monthly:['goalResult','change','bottleneck','experiment'],quarterly:['hope','evidence','choices','nextGoals'],yearly:['coordinates','expectations','keepRelease','nextYear'],decision:['decision','options','facts','expectation','failure','choice','firstStep']}[row.type]||[];
     const missing=required.some(k=>!(data.answers?.[k]||[]).some(v=>String(v).trim()))||!String(data.action||'').trim()||(row.type==='daily'&&!String(data.ifCondition||'').trim())||!String(data.ifThen||'').trim()||!validIsoDate(data.verifyDate)||(row.type==='decision'&&!decoded.title.trim()); if(missing)return error(res,400,'请先完成所有必填项，并确认预期验证日期有效');
-    db.prepare(`UPDATE records SET status='completed',version=version+1,completed_at=?,updated_at=? WHERE id=?`).run(now(),now(),id); return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
+    const normalizedSnapshot=normalizeTemplateSnapshot(data.templateSnapshot,row.type);
+    if(!normalizedSnapshot){const stage=normalizeStage(setting(user.id,'stage',defaultStage()));data.templateSnapshot={version:1,review:stage.reviewTemplates[row.type],action:stage.actionTemplate}}
+    else data.templateSnapshot=normalizedSnapshot;
+    const stamp=now(),storedData=encryptData(data,dataScope('record',user.id,id,'data'));
+    db.prepare(`UPDATE records SET data=?,status='completed',version=version+1,completed_at=?,updated_at=? WHERE id=?`).run(storedData,stamp,stamp,id); return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
   }
   if (/^\/api\/records\/[^/]+\/verify$/.test(path) && method === 'POST') {
     const id=path.split('/')[3], row=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id); if(!row)return error(res,404,'记录不存在'); if(row.status!=='completed')return error(res,409,'只有待验证记录可以提交结果');
