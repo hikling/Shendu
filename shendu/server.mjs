@@ -1,6 +1,7 @@
 import http from 'node:http';
+import https from 'node:https';
 import { readFileSync, existsSync, mkdirSync, statSync, createReadStream, writeFileSync, appendFileSync, unlinkSync, readdirSync, chmodSync } from 'node:fs';
-import { join, extname, resolve, dirname } from 'node:path';
+import { join, extname, resolve, dirname, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -177,6 +178,7 @@ const initialiseMasterKey = () => {
   try { persistMasterKey(masterKey); }
   catch (e) {
     masterKeyError = '内部备份密钥无法写入数据目录，请检查 data 目录权限。';
+    if (!configured && !persisted) masterKey = null;
     console.error(masterKeyError, e);
   }
 };
@@ -225,36 +227,48 @@ const beijingFileStamp = () => {
   const p = beijingParts();
   return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}`;
 };
-const accountBackupFilename = () => `shendu-${beijingFileStamp()}.shendu`;
+const accountBackupFilename = () => `shendu-${beijingFileStamp()}-${randomBytes(3).toString('hex')}.shendu`;
 const json = (res, status, data, headers = {}) => {
   const body = JSON.stringify(data);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(body);
 };
 const error = (res, status, message, code = 'request_error') => json(res, status, { error: code, message });
-const parseCookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').filter(Boolean).map(v => {
-  const i = v.indexOf('='); return [decodeURIComponent(v.slice(0, i).trim()), decodeURIComponent(v.slice(i + 1).trim())];
-}));
+const parseCookies = req => {
+  const cookies=Object.create(null);
+  for(const part of String(req.headers.cookie||'').split(';')){
+    const index=part.indexOf('=');if(index<1)continue;
+    try{cookies[decodeURIComponent(part.slice(0,index).trim())]=decodeURIComponent(part.slice(index+1).trim())}catch{}
+  }
+  return cookies;
+};
 const setSessionCookie = (res, token, maxAge = 2592000) => {
   const secure = COOKIE_SECURE ? '; Secure' : '';
   res.setHeader('Set-Cookie', `shendu_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`);
 };
-const readBody = (req, limit = 8 * 1024 * 1024) => new Promise((resolveBody, reject) => {
-  const chunks = []; let size = 0;
-  req.on('data', chunk => { size += chunk.length; if (size > limit) { reject(Object.assign(new Error('请求内容过大'), { status: 413 })); req.destroy(); } else chunks.push(chunk); });
-  req.on('end', () => resolveBody(Buffer.concat(chunks)));
+const readBody = (req, limit = 2 * 1024 * 1024) => new Promise((resolveBody, reject) => {
+  const chunks = []; let size = 0, rejected=false;
+  req.on('data', chunk => { size += chunk.length; if (size > limit) { if(!rejected){rejected=true;reject(Object.assign(new Error('请求内容过大'),{status:413,code:'payload_too_large'}))} } else if(!rejected)chunks.push(chunk); });
+  req.on('end', () => {if(!rejected)resolveBody(Buffer.concat(chunks))});
   req.on('error', reject);
 });
 const readJson = async (req, limit) => {
+  if (!/^application\/json(?:\s*;|\s*$)/i.test(String(req.headers['content-type'] || ''))) {
+    throw Object.assign(new Error('请求必须使用 application/json 格式'), { status: 415, code: 'unsupported_media_type' });
+  }
   const raw = await readBody(req, limit);
+  if(req.authUser&&sessionUser(req)?.id!==req.authUser.id)throw Object.assign(new Error('登录已失效，请重新登录'),{status:401,code:'unauthorized'});
   if (!raw.length) return {};
-  try { return JSON.parse(raw.toString('utf8')); } catch { throw Object.assign(new Error('请求格式不正确'), { status: 400 }); }
+  let value;try { value=JSON.parse(raw.toString('utf8')); } catch { throw Object.assign(new Error('请求格式不正确'), { status: 400 }); }
+  if(!value||typeof value!=='object'||Array.isArray(value))throw Object.assign(new Error('请求必须是 JSON 对象'),{status:400});
+  return value;
 };
 const hashPassword = (password) => {
   const salt = randomBytes(16);
   const hash = scryptSync(password, salt, 64, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
   return `scrypt$32768$${salt.toString('base64')}$${hash.toString('base64')}`;
 };
+const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(32).toString('base64url'));
 const verifyPassword = (password, stored) => {
   try {
     const [, n, salt64, hash64] = stored.split('$');
@@ -291,7 +305,8 @@ const sessionUser = (req) => {
   if (!token) return null;
   const tokenHash = createHash('sha256').update(token).digest('hex');
   const row = db.prepare(`SELECT u.*,s.expires_at,s.session_version AS sv FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`).get(tokenHash);
-  if (!row || row.status !== 'active' || row.session_version !== row.sv || Date.parse(row.expires_at) < Date.now()) return null;
+  const expires=row?Date.parse(row.expires_at):NaN;
+  if (!row || row.status !== 'active' || row.session_version !== row.sv || !Number.isFinite(expires) || expires <= Date.now()) return null;
   return row;
 };
 const requireUser = (req, res) => { const u = sessionUser(req); if (!u) error(res, 401, '登录已失效，请重新登录', 'unauthorized'); return u; };
@@ -300,6 +315,7 @@ const createSession = (res, user) => {
   const tokenHash = createHash('sha256').update(token).digest('hex');
   const expires = new Date(Date.now() + 30 * 86400000).toISOString();
   db.prepare(`INSERT INTO sessions(token_hash,user_id,session_version,expires_at,created_at) VALUES(?,?,?,?,?)`).run(tokenHash, user.id, user.session_version, expires, now());
+  db.prepare(`DELETE FROM sessions WHERE user_id=? AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE user_id=? ORDER BY created_at DESC LIMIT 20)`).run(user.id,user.id);
   setSessionCookie(res, token);
 };
 const checkPasswordShape = p => typeof p === 'string' && p.length >= 15 && p.length <= 128;
@@ -349,6 +365,10 @@ const defaultStage = () => ({
   reviewTemplates: freshReviewTemplates(), actionTemplate: {...ACTION_TEMPLATE_DEFAULTS}
 });
 const defaultTheme = () => ({ preset: '潮汐青', primary: '#176B67', secondary: '#A86436', tertiary: '#536C9C', reduceMotion: false });
+const normalizeTheme = value => {
+  const defaults=defaultTheme(),source=isPlainObject(value)?value:{},color=(key)=>/^#[0-9a-f]{6}$/i.test(String(source[key]||''))?String(source[key]).toUpperCase():defaults[key];
+  return {preset:templateText(source.preset,defaults.preset,40),primary:color('primary'),secondary:color('secondary'),tertiary:color('tertiary'),reduceMotion:source.reduceMotion===true};
+};
 const recordOut = r => {
   const titleScope=dataScope('record',r.user_id,r.id,'title'),dataValueScope=dataScope('record',r.user_id,r.id,'data'),verificationScope=dataScope('record',r.user_id,r.id,'verification');
   const title=isEncryptedData(r.title)?decryptData(r.title,titleScope):r.title;
@@ -357,6 +377,12 @@ const recordOut = r => {
   return { ...r, title, data, verification, version: Number(r.version) };
 };
 const safeText = (v, max = 6000) => typeof v === 'string' ? v.slice(0, max) : '';
+const MAX_USERS=10000;
+const MAX_RECORDS_PER_USER=10000;
+const MAX_RECORD_DATA_BYTES=1024*1024;
+const MAX_ACCOUNT_CONTENT_BYTES=32*1024*1024;
+const accountRecordBytes = userId => db.prepare(`SELECT COALESCE(SUM(length(CAST(title AS BLOB))+length(CAST(data AS BLOB))+COALESCE(length(CAST(verification AS BLOB)),0)),0) AS n FROM records WHERE user_id=?`).get(userId).n;
+const recordStoredBytes = record => record ? Buffer.byteLength(record.title||'')+Buffer.byteLength(record.data||'')+Buffer.byteLength(record.verification||'') : 0;
 const validRecordType = t => ['daily','weekly','monthly','quarterly','yearly','decision'].includes(t);
 const isPlainObject = value => Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 const templateText = (value,fallback,max=240) => safeText(value,max).trim()||fallback;
@@ -373,7 +399,7 @@ const normalizeStage = value => {
   const defaults=defaultStage(),source=isPlainObject(value)?value:{},days=Number(source.days),sleep=Number(source.sleepTarget),energy=Number(source.energyTarget),metrics=Array.isArray(source.metrics)&&source.metrics.length===3?source.metrics:defaults.metrics;
   return {
     name:templateText(source.name,defaults.name,50),focus:templateText(source.focus,defaults.focus,300),
-    startDate:/^\d{4}-\d{2}-\d{2}$/.test(String(source.startDate||''))?source.startDate:defaults.startDate,
+    startDate:validIsoDate(String(source.startDate||''))?source.startDate:defaults.startDate,
     days:Number.isFinite(days)?Math.min(366,Math.max(7,Math.round(days))):defaults.days,
     sleepTarget:Number.isFinite(sleep)?Math.min(24,Math.max(0,sleep)):defaults.sleepTarget,
     energyTarget:Number.isFinite(energy)?Math.min(100,Math.max(0,energy)):defaults.energyTarget,
@@ -389,6 +415,14 @@ const normalizeTemplateSnapshot = (value,type) => {
 const validIsoDate = value => {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||'')))return false;
   const date=new Date(`${value}T00:00:00Z`);return Number.isFinite(date.valueOf())&&date.toISOString().slice(0,10)===value;
+};
+const validEntityId = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value||''));
+const validRecordPeriod = (type,value) => {
+  const period=String(value||'');
+  if(type==='weekly')return /^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$/.test(period);
+  if(type==='monthly')return /^\d{4}-(?:0[1-9]|1[0-2])$/.test(period);
+  if(type==='yearly')return /^\d{4}$/.test(period);
+  return validIsoDate(period);
 };
 
 function migrateSensitiveData() {
@@ -422,21 +456,28 @@ function migrateSensitiveData() {
 migrateSensitiveData();
 
 const rateMap = new Map();
+const clientAddress = req => {
+  const forwarded=String(req.headers['x-forwarded-for']||'').split(',').map(value=>value.trim()).filter(Boolean);
+  const candidate=forwarded.at(-1)||String(req.socket.remoteAddress||'').replace(/^::ffff:/,'');
+  return net.isIP(candidate)?candidate:'unknown';
+};
 const limited = (req, bucket, max, windowMs) => {
-  const ip = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
-  const key = `${bucket}:${ip}`; const t = Date.now(); let x = rateMap.get(key);
+  const key = `${bucket}:${clientAddress(req)}`; const t = Date.now(); let x = rateMap.get(key);
   if (!x || x.until < t) x = { count: 0, until: t + windowMs };
-  x.count += 1; rateMap.set(key, x); return x.count > max;
+  x.count += 1; rateMap.set(key, x);
+  if(rateMap.size>10000){for(const [entryKey,entry] of rateMap)if(entry.until<t)rateMap.delete(entryKey);while(rateMap.size>8000)rateMap.delete(rateMap.keys().next().value)}
+  return x.count > max;
 };
 
 function exportPayload(userId) {
-  const user = db.prepare(`SELECT username,display_name FROM users WHERE id=?`).get(userId);
-  const records = db.prepare(`SELECT * FROM records WHERE user_id=? ORDER BY updated_at`).all(userId).map(recordOut);
-  return {
-    profile: { username: user.username, displayName: user.display_name }, records,
-    stage: setting(userId, 'stage', defaultStage()), theme: setting(userId, 'theme', defaultTheme()),
-    exportedAt: now()
-  };
+  db.exec('BEGIN');
+  try{
+    const user=db.prepare(`SELECT username,display_name FROM users WHERE id=?`).get(userId);
+    if(!user)throw new Error('账户不存在');
+    const records=db.prepare(`SELECT * FROM records WHERE user_id=? ORDER BY updated_at`).all(userId).map(recordOut);
+    const payload={profile:{username:user.username,displayName:user.display_name},records,stage:normalizeStage(setting(userId,'stage',defaultStage())),theme:normalizeTheme(setting(userId,'theme',defaultTheme())),exportedAt:now()};
+    db.exec('COMMIT');return payload;
+  }catch(error){try{db.exec('ROLLBACK')}catch{}throw error}
 }
 
 function createBackupBuffer(userId, password) {
@@ -506,6 +547,7 @@ function parseLegacyStream(lines,password) {
 function parseLegacyEnvelope(buffer,password) {
   let envelope;try{envelope=JSON.parse(buffer.toString('utf8'))}catch{throw new Error('这不是有效的慎独加密备份文件')}
   if(envelope?.format!=='shendu-encrypted-backup'||envelope.version!==1||envelope.kind!=='account')throw new Error('不支持的备份格式');
+  if(envelope.kdf?.iterations!==600000||typeof envelope.kdf?.salt!=='string'||envelope.kdf.salt.length>128||typeof envelope.cipher?.iv!=='string'||envelope.cipher.iv.length>128)throw new Error('旧备份密钥参数不正确');
   const header={format:envelope.format,version:envelope.version,kind:envelope.kind,createdAt:envelope.createdAt,kdf:envelope.kdf,cipher:envelope.cipher,payloadBytes:envelope.payloadBytes,...(typeof envelope.label==='string'?{label:envelope.label}:{})};
   try { const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64url'),envelope.kdf.iterations,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64url'));decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64url'));const payload=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext,'base64url')),decipher.final()]).toString('utf8'));if(payload.format!=='shendu-user-backup'||payload.version!==1||!Array.isArray(payload.reviews))throw new Error('旧备份内容格式无效');const entries=[{kind:'profile',value:payload.source||{}},...legacySettingsEntries(payload.settings),...payload.reviews.map(value=>({kind:'record',value:legacyReviewToRecord(value)}))];return{header:{format:'shendu-encrypted-backup',exportedAt:payload.exportedAt||envelope.createdAt||'',count:entries.length},entries}; } catch(e){if(e.message==='旧备份内容格式无效')throw e;throw new Error('备份密码错误，或文件已经损坏')}
 }
@@ -513,6 +555,7 @@ function parseCurrentEnvelope(envelope,password) {
   const isV3=envelope?.format==='shendu-v3'&&envelope.version===3;
   const isV4=envelope?.format==='shendu-v4'&&envelope.version===4&&envelope.kind==='account';
   if((!isV3&&!isV4)||envelope.kdf?.name!=='PBKDF2-HMAC-SHA-256'||envelope.kdf?.iterations!==600000||envelope.cipher?.name!=='AES-256-GCM'||envelope.compression!=='gzip')throw new Error('不支持的备份格式');
+  if(!validBackupCipherFields(envelope))throw new Error('备份加密参数不正确');
   const header=isV4?{format:'shendu-v4',version:4,kind:'account',kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'}:{format:'shendu-v3',version:3,kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'};
   try {
     const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'));
@@ -557,6 +600,10 @@ function parseBackupBuffer(buffer, password) {
 
 const MAX_BACKUP_FILE_BYTES = 36 * 1024 * 1024;
 const MAX_BACKUP_REQUEST_BYTES = 48 * 1024 * 1024;
+function validBackupCipherFields(envelope) {
+  const valid=(value,length)=>typeof value==='string'&&value.length<=64&&/^[A-Za-z0-9+/]+={0,2}$/.test(value)&&Buffer.from(value,'base64').length===length;
+  return valid(envelope.kdf?.salt,16)&&valid(envelope.cipher?.iv,12)&&valid(envelope.tag,16)&&typeof envelope.data==='string';
+}
 function backupPasswordFrom(value) {
   const password = typeof value === 'string' ? value : '';
   if (!password || password.length > 256) throw new Error('请输入生成这份备份时使用的密码');
@@ -619,8 +666,27 @@ function getBackupStatus(userId) {
   }
 }
 
+function normalizeImportedRecord(value) {
+  if(!isPlainObject(value)||!validRecordType(value.type)||!validRecordPeriod(value.type,value.period)||!isPlainObject(value.data))return null;
+  if(Buffer.byteLength(JSON.stringify(value.data))>MAX_RECORD_DATA_BYTES)return null;
+  const updatedAt=validTime(value.updated_at)?new Date(value.updated_at).toISOString():now();
+  const createdAt=validTime(value.created_at)?new Date(value.created_at).toISOString():updatedAt;
+  const verification=isPlainObject(value.verification)?value.verification:null;
+  let status=['draft','completed','verified'].includes(value.status)?value.status:'draft';
+  if(status==='verified'&&!verification)status='completed';
+  return {
+    id:validEntityId(value.id)?value.id:randomUUID(),type:value.type,period:String(value.period),title:safeText(value.title,200),data:value.data,
+    status,version:Math.max(1,Math.min(1000000,Number(value.version)||1)),verification,created_at:createdAt,updated_at:updatedAt,
+    completed_at:validTime(value.completed_at)?new Date(value.completed_at).toISOString():null,
+    verified_at:status==='verified'&&validTime(value.verified_at)?new Date(value.verified_at).toISOString():null
+  };
+}
+
 function applyBackup(userId, parsed, mode) {
-  const records = parsed.entries.filter(x => x.kind === 'record').map(x => x.value);
+  if(!Array.isArray(parsed.entries)||parsed.entries.length>MAX_RECORDS_PER_USER+10)throw new Error('备份条目数量不正确');
+  const recordEntries=parsed.entries.filter(x=>x?.kind==='record'),records=recordEntries.map(x=>normalizeImportedRecord(x.value));
+  if(recordEntries.length>MAX_RECORDS_PER_USER)throw new Error(`单个账户最多恢复 ${MAX_RECORDS_PER_USER} 条复盘记录`);
+  if(records.some(record=>!record))throw new Error('备份中包含无效的复盘记录');
   db.exec('BEGIN IMMEDIATE');
   try {
     if (mode === 'replace') {
@@ -629,7 +695,7 @@ function applyBackup(userId, parsed, mode) {
     }
     for (const rec of records) {
       if (!validRecordType(rec.type)) continue;
-      let recordId = rec.id || randomUUID();
+      let recordId = rec.id;
       const natural = rec.type==='decision'?null:db.prepare(`SELECT id,updated_at FROM records WHERE user_id=? AND type=? AND period=?`).get(userId,rec.type,rec.period);
       if(natural)recordId=natural.id;
       const collision = db.prepare(`SELECT user_id FROM records WHERE id=?`).get(recordId);
@@ -639,15 +705,17 @@ function applyBackup(userId, parsed, mode) {
       const title=encryptData(safeText(rec.title,200),dataScope('record',userId,recordId,'title'));
       const data=encryptData(rec.data||{},dataScope('record',userId,recordId,'data'));
       const verification=rec.verification?encryptData(rec.verification,dataScope('record',userId,recordId,'verification')):null;
-      const status=['draft','completed','verified'].includes(rec.status)?rec.status:'draft',version=Math.max(1,Number(rec.version)||1),updatedAt=validTime(rec.updated_at)?rec.updated_at:now(),createdAt=validTime(rec.created_at)?rec.created_at:updatedAt,completedAt=validTime(rec.completed_at)?rec.completed_at:null,verifiedAt=validTime(rec.verified_at)?rec.verified_at:null;
+      const status=rec.status,version=rec.version,updatedAt=rec.updated_at,createdAt=rec.created_at,completedAt=rec.completed_at,verifiedAt=rec.verified_at;
       if(existing)db.prepare(`UPDATE records SET type=?,period=?,title=?,data=?,status=?,version=?,verification=?,updated_at=?,completed_at=?,verified_at=? WHERE id=? AND user_id=?`).run(rec.type,rec.period,title,data,status,version,verification,updatedAt,completedAt,verifiedAt,recordId,userId);
       else db.prepare(`INSERT INTO records(id,user_id,type,period,title,data,status,version,verification,created_at,updated_at,completed_at,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(recordId,userId,rec.type,rec.period,title,data,status,version,verification,createdAt,updatedAt,completedAt,verifiedAt);
     }
     for (const e of parsed.entries) {
-      if (!['stage','theme'].includes(e.kind)) continue;
+      if (!['stage','theme'].includes(e?.kind)) continue;
       const exists=db.prepare(`SELECT 1 FROM user_settings WHERE user_id=? AND key=?`).get(userId,e.kind);
-      if (mode==='replace'||!exists) putSetting(userId,e.kind,e.value);
+      if (mode==='replace'||!exists) putSetting(userId,e.kind,e.kind==='stage'?normalizeStage(e.value):normalizeTheme(e.value));
     }
+    if(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE user_id=?`).get(userId).n>MAX_RECORDS_PER_USER)throw new Error('恢复后的复盘记录数量超过账户上限');
+    if(accountRecordBytes(userId)>MAX_ACCOUNT_CONTENT_BYTES)throw new Error('恢复后的复盘内容超过账户存储上限');
     db.exec('COMMIT');
     return records.length;
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -657,26 +725,31 @@ const MAX_SITE_BACKUP_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_SITE_BACKUP_REQUEST_BYTES = 176 * 1024 * 1024;
 function siteBackupPayload() {
   requireMasterKey();
-  const users=db.prepare(`SELECT id,username,display_name,password_hash,role,status,session_version,created_at FROM users ORDER BY created_at,id`).all();
-  const settings=db.prepare(`SELECT user_id,key,value,updated_at FROM user_settings ORDER BY user_id,key`).all().map(row=>{
-    if(row.key==='backup_secret'){
-      const wrapped=setting(row.user_id,'backup_secret');
-      return {user_id:row.user_id,key:row.key,value:wrapped?decryptSecret(wrapped):null,updated_at:row.updated_at};
-    }
-    return {user_id:row.user_id,key:row.key,value:setting(row.user_id,row.key),updated_at:row.updated_at};
-  });
-  const records=db.prepare(`SELECT * FROM records ORDER BY user_id,updated_at,id`).all().map(recordOut);
-  const targets=db.prepare(`SELECT * FROM backup_targets ORDER BY user_id,created_at,id`).all().map(row=>({
-    id:row.id,user_id:row.user_id,name:row.name,kind:row.kind,config:decryptSecret(row.encrypted_config),schedule:row.schedule,
-    enabled:Number(row.enabled),last_run_at:row.last_run_at,last_success_at:row.last_success_at,last_error:row.last_error,created_at:row.created_at,updated_at:row.updated_at
-  }));
-  const runs=db.prepare(`SELECT id,target_id,user_id,status,message,created_at FROM backup_runs ORDER BY created_at,id`).all();
-  return {
-    format:'shendu-site-data',version:1,createdAt:now(),
-    schemaVersion:Number(db.prepare(`SELECT value FROM schema_meta WHERE key='schema_version'`).get()?.value||6),
-    publicRegistration:db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get()?.value==='true',
-    users,settings,records,targets,runs
-  };
+  db.exec('BEGIN');
+  try{
+    const users=db.prepare(`SELECT id,username,display_name,password_hash,role,status,session_version,created_at FROM users ORDER BY created_at,id`).all();
+    const settings=db.prepare(`SELECT user_id,key,value,updated_at FROM user_settings ORDER BY user_id,key`).all().map(row=>{
+      if(row.key==='backup_secret'){
+        const wrapped=setting(row.user_id,'backup_secret');
+        return {user_id:row.user_id,key:row.key,value:wrapped?decryptSecret(wrapped):null,updated_at:row.updated_at};
+      }
+      return {user_id:row.user_id,key:row.key,value:setting(row.user_id,row.key),updated_at:row.updated_at};
+    });
+    const records=db.prepare(`SELECT * FROM records ORDER BY user_id,updated_at,id`).all().map(recordOut);
+    const targets=db.prepare(`SELECT * FROM backup_targets ORDER BY user_id,created_at,id`).all().map(row=>({
+      id:row.id,user_id:row.user_id,name:row.name,kind:row.kind,config:decryptSecret(row.encrypted_config),schedule:row.schedule,
+      enabled:Number(row.enabled),last_run_at:row.last_run_at,last_success_at:row.last_success_at,last_error:row.last_error,created_at:row.created_at,updated_at:row.updated_at
+    }));
+    const runs=db.prepare(`SELECT id,target_id,user_id,status,message,created_at FROM backup_runs ORDER BY created_at,id`).all();
+    const payload={
+      format:'shendu-site-data',version:1,createdAt:now(),
+      schemaVersion:Number(db.prepare(`SELECT value FROM schema_meta WHERE key='schema_version'`).get()?.value||6),
+      publicRegistration:db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get()?.value==='true',
+      users,settings,records,targets,runs
+    };
+    db.exec('COMMIT');
+    return payload;
+  }catch(error){try{db.exec('ROLLBACK')}catch{}throw error}
 }
 function createSiteBackupBuffer(password) {
   const salt=randomBytes(16),iv=randomBytes(12),key=pbkdf2Sync(password,salt,600000,32,'sha256');
@@ -697,6 +770,7 @@ function parseSiteBackupBuffer(buffer,password) {
   if(buffer.length>MAX_SITE_BACKUP_FILE_BYTES)throw new Error('整站备份超过 128 MB，无法通过网页恢复');
   let envelope;try{envelope=JSON.parse(buffer.toString('utf8'))}catch{throw new Error('这不是有效的慎独整站备份文件')}
   if(envelope?.format!=='shendu-site-v1'||envelope.version!==1||envelope.kind!=='site'||envelope.kdf?.name!=='PBKDF2-HMAC-SHA-256'||envelope.kdf?.iterations!==600000||envelope.cipher?.name!=='AES-256-GCM'||envelope.compression!=='gzip')throw new Error('不支持的整站备份格式');
+  if(!validBackupCipherFields(envelope))throw new Error('整站备份加密参数不正确');
   const header={format:'shendu-site-v1',version:1,kind:'site',kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'};
   try{
     const key=pbkdf2Sync(backupPasswordFrom(password),Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'));
@@ -714,40 +788,43 @@ function parseSiteBackupBuffer(buffer,password) {
 function validPasswordHash(value) {
   const parts=String(value||'').split('$');if(parts.length!==4||parts[0]!=='scrypt')return false;
   const cost=Number(parts[1]);if(![16384,32768].includes(cost))return false;
-  try{return Buffer.from(parts[2],'base64').length>=16&&Buffer.from(parts[3],'base64').length===64}catch{return false}
+  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(parts[2])||!/^[A-Za-z0-9+/]+={0,2}$/.test(parts[3]))return false;
+  try{return Buffer.from(parts[2],'base64').length===16&&Buffer.from(parts[3],'base64').length===64}catch{return false}
 }
 function validateSiteBackupPayload(payload) {
   const groups=['users','settings','records','targets','runs'];
   if(groups.some(key=>!Array.isArray(payload[key])))throw new Error('整站备份数据结构无效');
-  if(!payload.users.length||payload.users.length>10000||payload.settings.length>30000||payload.records.length>500000||payload.targets.length>80000||payload.runs.length>500000)throw new Error('整站备份数据结构无效');
+  if(!payload.users.length||payload.users.length>MAX_USERS||payload.settings.length>30000||payload.records.length>500000||payload.targets.length>80000||payload.runs.length>500000)throw new Error('整站备份数据结构无效');
   const userIds=new Set(),usernames=new Set();let superadmins=0;
   for(const user of payload.users){
     const usernameKey=String(user.username||'').toLocaleLowerCase();
-    if(typeof user.id!=='string'||!user.id||user.id.length>128||!checkUsername(user.username)||userIds.has(user.id)||usernames.has(usernameKey)||!validPasswordHash(user.password_hash)||!['superadmin','admin','member'].includes(user.role)||!['active','disabled'].includes(user.status))throw new Error('整站备份中的账户数据无效');
+    if(!validEntityId(user.id)||!checkUsername(user.username)||userIds.has(user.id)||usernames.has(usernameKey)||!validPasswordHash(user.password_hash)||!['superadmin','admin','member'].includes(user.role)||!['active','disabled'].includes(user.status)||!Number.isSafeInteger(Number(user.session_version))||Number(user.session_version)<1)throw new Error('整站备份中的账户数据无效');
     userIds.add(user.id);usernames.add(usernameKey);if(user.role==='superadmin')superadmins+=1;
   }
   if(superadmins!==1)throw new Error('整站备份必须包含且只能包含一个超级管理员账户');
+  if(payload.users.find(user=>user.role==='superadmin')?.status!=='active')throw new Error('整站备份中的超级管理员必须处于正常状态');
   const settingKeys=new Set();
   for(const item of payload.settings){
     const identity=`${item.user_id}:${item.key}`;
     if(!userIds.has(item.user_id)||!['stage','theme','backup_secret'].includes(item.key)||settingKeys.has(identity))throw new Error('整站备份中的设置数据无效');
     if(['stage','theme'].includes(item.key)&&(typeof item.value!=='object'||item.value===null||Array.isArray(item.value)))throw new Error('整站备份中的设置数据无效');
-    if(item.key==='backup_secret'&&item.value!==null&&(!item.value||typeof item.value.password!=='string'||item.value.password.length>256))throw new Error('整站备份中的备份密码配置无效');
+    if(item.key==='backup_secret'&&item.value!==null&&(!item.value||!checkPasswordShape(item.value.password)))throw new Error('整站备份中的备份密码配置无效');
     settingKeys.add(identity);
   }
-  const recordIds=new Set();
+  const recordIds=new Set(),recordCounts=new Map();
   for(const record of payload.records){
-    if(!userIds.has(record.user_id)||typeof record.id!=='string'||!record.id||record.id.length>128||recordIds.has(record.id)||!validRecordType(record.type)||typeof record.period!=='string'||!record.period||record.period.length>32||!['draft','completed','verified'].includes(record.status)||typeof record.title!=='string'||typeof record.data!=='object'||record.data===null||Array.isArray(record.data)||(record.verification!==null&&record.verification!==undefined&&(typeof record.verification!=='object'||Array.isArray(record.verification))))throw new Error('整站备份中的复盘数据无效');
-    recordIds.add(record.id);
+    if(!userIds.has(record.user_id)||!validEntityId(record.id)||recordIds.has(record.id)||!validRecordType(record.type)||!validRecordPeriod(record.type,record.period)||!['draft','completed','verified'].includes(record.status)||typeof record.title!=='string'||!isPlainObject(record.data)||Buffer.byteLength(JSON.stringify(record.data))>MAX_RECORD_DATA_BYTES||(record.verification!==null&&record.verification!==undefined&&!isPlainObject(record.verification))||(record.status==='verified'&&!isPlainObject(record.verification)))throw new Error('整站备份中的复盘数据无效');
+    recordIds.add(record.id);const count=(recordCounts.get(record.user_id)||0)+1;if(count>MAX_RECORDS_PER_USER)throw new Error(`整站备份中的单个账户不能超过 ${MAX_RECORDS_PER_USER} 条复盘记录`);recordCounts.set(record.user_id,count);
   }
   const targetIds=new Set();
   for(const target of payload.targets){
-    if(!userIds.has(target.user_id)||typeof target.id!=='string'||!target.id||target.id.length>128||targetIds.has(target.id)||!['webdav','s3'].includes(target.kind)||!['manual','daily','weekly'].includes(target.schedule)||typeof target.config!=='object'||target.config===null||Array.isArray(target.config))throw new Error('整站备份中的外部备份配置无效');
+    if(!userIds.has(target.user_id)||!validEntityId(target.id)||targetIds.has(target.id)||!['webdav','s3'].includes(target.kind)||!['manual','daily','weekly'].includes(target.schedule)||!isPlainObject(target.config))throw new Error('整站备份中的外部备份配置无效');
+    try{normalizeBackupConfig(target.kind,target.config)}catch{throw new Error('整站备份中的外部备份配置无效')}
     targetIds.add(target.id);
   }
   const runIds=new Set();
   for(const run of payload.runs){
-    if(!userIds.has(run.user_id)||!targetIds.has(run.target_id)||typeof run.id!=='string'||!run.id||run.id.length>128||runIds.has(run.id))throw new Error('整站备份中的运行记录无效');
+    if(!userIds.has(run.user_id)||!targetIds.has(run.target_id)||!validEntityId(run.id)||runIds.has(run.id))throw new Error('整站备份中的运行记录无效');
     runIds.add(run.id);
   }
 }
@@ -763,7 +840,7 @@ function applySiteBackup(payload) {
     for(const user of payload.users)insertUser.run(user.id,user.username,safeText(user.display_name||user.username,32),user.password_hash,user.role,user.status,Math.max(1,Number(user.session_version)||1),validTime(user.created_at)?user.created_at:now());
     for(const item of payload.settings){
       if(item.key==='backup_secret'){if(item.value)putSetting(item.user_id,item.key,encryptSecret(item.value));}
-      else putSetting(item.user_id,item.key,item.value);
+      else putSetting(item.user_id,item.key,item.key==='stage'?normalizeStage(item.value):normalizeTheme(item.value));
       if(validTime(item.updated_at))db.prepare(`UPDATE user_settings SET updated_at=? WHERE user_id=? AND key=?`).run(item.updated_at,item.user_id,item.key);
     }
     const insertRecord=db.prepare(`INSERT INTO records(id,user_id,type,period,title,data,status,version,verification,created_at,updated_at,completed_at,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
@@ -771,6 +848,7 @@ function applySiteBackup(payload) {
       const createdAt=validTime(record.created_at)?record.created_at:now(),updatedAt=validTime(record.updated_at)?record.updated_at:createdAt;
       insertRecord.run(record.id,record.user_id,record.type,record.period,encryptData(safeText(record.title,200),dataScope('record',record.user_id,record.id,'title')),encryptData(record.data||{},dataScope('record',record.user_id,record.id,'data')),record.status,Math.max(1,Number(record.version)||1),record.verification?encryptData(record.verification,dataScope('record',record.user_id,record.id,'verification')):null,createdAt,updatedAt,validTime(record.completed_at)?record.completed_at:null,validTime(record.verified_at)?record.verified_at:null);
     }
+    for(const user of payload.users)if(accountRecordBytes(user.id)>MAX_ACCOUNT_CONTENT_BYTES)throw new Error('整站备份中的单个账户内容超过存储上限');
     const insertTarget=db.prepare(`INSERT INTO backup_targets(id,user_id,name,kind,encrypted_config,schedule,enabled,last_run_at,last_success_at,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
     for(const target of payload.targets)insertTarget.run(target.id,target.user_id,safeText(target.name,80),target.kind,encryptSecret(target.config),target.schedule,target.enabled===0?0:1,validTime(target.last_run_at)?target.last_run_at:null,validTime(target.last_success_at)?target.last_success_at:null,safeText(target.last_error,300)||null,validTime(target.created_at)?target.created_at:now(),validTime(target.updated_at)?target.updated_at:now());
     const insertRun=db.prepare(`INSERT INTO backup_runs(id,target_id,user_id,status,message,created_at) VALUES(?,?,?,?,?,?)`);
@@ -784,25 +862,92 @@ function applySiteBackup(payload) {
 const isPrivateIp = ip => {
   if (net.isIPv4(ip)) {
     const p = ip.split('.').map(Number);
-    return p[0] === 10 || p[0] === 127 || p[0] === 0 || (p[0] === 169 && p[1] === 254) || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168) || (p[0] >= 224);
+    return p[0] === 10 || p[0] === 127 || p[0] === 0 || p[0] >= 224 ||
+      (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
+      (p[0] === 169 && p[1] === 254) ||
+      (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+      (p[0] === 192 && (p[1] === 0 || p[1] === 168 || (p[1] === 88 && p[2] === 99))) ||
+      (p[0] === 198 && (p[1] === 18 || p[1] === 19 || (p[1] === 51 && p[2] === 100))) ||
+      (p[0] === 203 && p[1] === 0 && p[2] === 113);
   }
-  return ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80') || ip === '::';
+  const value=String(ip).toLowerCase();
+  if(value.startsWith('::ffff:')){
+    const mapped=value.slice(7);
+    if(net.isIPv4(mapped))return isPrivateIp(mapped);
+    const match=/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
+    if(match){const first=parseInt(match[1],16),second=parseInt(match[2],16);return isPrivateIp(`${first>>8}.${first&255}.${second>>8}.${second&255}`)}
+  }
+  return value==='::1'||value==='::'||value.startsWith('fc')||value.startsWith('fd')||/^fe[89abcdef]/.test(value)||value.startsWith('ff')||value.startsWith('64:ff9b:')||value.startsWith('2001:0:')||value.startsWith('2001:db8:')||value.startsWith('2002:');
 };
+function endpointUrl(raw,label='地址') {
+  let url;try{url=new URL(String(raw||''))}catch{throw new Error(`${label}格式不正确`)}
+  if(url.protocol!=='https:')throw new Error(`${label}只允许 HTTPS`);
+  if(url.username||url.password)throw new Error(`${label}不能包含账号或密码`);
+  if(url.search||url.hash)throw new Error(`${label}不能包含查询参数或片段`);
+  const hostname=url.hostname.toLowerCase(),literal=hostname.replace(/^\[|\]$/g,'');
+  if(['localhost','localhost.localdomain'].includes(hostname)||(net.isIP(literal)&&isPrivateIp(literal)))throw new Error(`${label}不允许本机或内网地址`);
+  return url;
+}
+function backupDirectory(value) {
+  const directory=String(value||'shendu').trim().replace(/^\/+|\/+$/g,'');
+  if(!directory||directory.length>300||/[\0\r\n\\%?#]/.test(directory)||directory.split('/').some(part=>!part||part==='.'||part==='..'))throw new Error('远端目录格式不正确');
+  return directory;
+}
+function credentialText(value,label,max=1024) {
+  const text=String(value||'');if(!text||text.length>max||/[\r\n\0]/.test(text))throw new Error(`${label}格式不正确`);return text;
+}
+function normalizeBackupConfig(kind,value) {
+  if(!isPlainObject(value))throw new Error('外部备份配置不正确');
+  const directory=backupDirectory(value.directory);
+  if(kind==='webdav'){
+    const url=endpointUrl(value.url,'WebDAV 地址');
+    return {url:url.href.replace(/\/$/,''),username:credentialText(value.username,'WebDAV 账号',256),password:credentialText(value.password,'WebDAV 密码'),directory};
+  }
+  if(kind==='s3'){
+    const endpoint=endpointUrl(value.endpoint,'S3 Endpoint'),pathStyle=value.pathStyle===true;
+    const bucket=String(value.bucket||'').trim();
+    const bucketPattern=pathStyle?/^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/:/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+    if(!bucketPattern.test(bucket)||bucket.includes('..'))throw new Error('S3 Bucket 名称格式不正确');
+    const region=String(value.region||'auto').trim();if(!/^[A-Za-z0-9-]{1,64}$/.test(region))throw new Error('S3 Region 格式不正确');
+    return {endpoint:endpoint.href.replace(/\/$/,''),region,bucket,accessKey:credentialText(value.accessKey,'S3 Access Key',256),secretKey:credentialText(value.secretKey,'S3 Secret Key'),directory,pathStyle};
+  }
+  throw new Error('目标类型不正确');
+}
 async function assertPublicHttps(raw) {
-  const u = new URL(raw); if (u.protocol !== 'https:') throw new Error('只允许 HTTPS 地址');
-  if (['localhost','localhost.localdomain'].includes(u.hostname)) throw new Error('不允许本机或内网地址');
+  const u=endpointUrl(raw);
   const addresses = await lookup(u.hostname, { all: true });
   if (!addresses.length || addresses.some(a => isPrivateIp(a.address))) throw new Error('目标解析到了内网或保留地址');
-  return u;
+  return {url:u,addresses};
+}
+function pinnedHttpsRequest(validated,target,{method='GET',headers={},body=Buffer.alloc(0),maxResponseBytes=1024*1024}={}) {
+  return new Promise((resolveRequest,rejectRequest)=>{
+    const targetUrl=target instanceof URL?target:new URL(target);
+    const allowedHost=targetUrl.hostname===validated.url.hostname||targetUrl.hostname.endsWith(`.${validated.url.hostname}`);
+    if(targetUrl.protocol!=='https:'||targetUrl.port!==validated.url.port||!allowedHost)return rejectRequest(new Error('外部备份目标地址校验失败'));
+    const requestHeaders={...headers};if(body.length&&!Object.keys(requestHeaders).some(name=>name.toLowerCase()==='content-length'))requestHeaders['Content-Length']=String(body.length);
+    const request=https.request({protocol:'https:',hostname:targetUrl.hostname,port:targetUrl.port||443,path:`${targetUrl.pathname}${targetUrl.search}`,method,headers:requestHeaders,servername:targetUrl.hostname,rejectUnauthorized:true,lookup(_hostname,options,callback){
+      const candidates=options?.family?validated.addresses.filter(item=>item.family===options.family):validated.addresses;
+      const available=candidates.length?candidates:validated.addresses;
+      if(options?.all)return callback(null,available.map(item=>({address:item.address,family:item.family})));
+      const selected=available[0];return callback(null,selected.address,selected.family);
+    }},response=>{
+      const chunks=[];let size=0;
+      response.on('data',chunk=>{size+=chunk.length;if(size>maxResponseBytes){request.destroy(new Error('外部备份服务返回内容过大'));return}chunks.push(chunk)});
+      response.on('end',()=>resolveRequest({ok:response.statusCode>=200&&response.statusCode<300,status:response.statusCode||0,body:Buffer.concat(chunks)}));
+    });
+    const deadline=setTimeout(()=>request.destroy(new Error('外部备份服务响应超时')),30000);
+    request.once('close',()=>clearTimeout(deadline));request.once('error',rejectRequest);request.end(body);
+  });
 }
 const awsDate = d => d.toISOString().replace(/[:-]|\.\d{3}/g, '');
 async function s3Request(config, key, method, body = Buffer.alloc(0)) {
-  const endpoint = await assertPublicHttps(config.endpoint); const region = config.region || 'auto';
+  const validated=await assertPublicHttps(config.endpoint),endpoint=validated.url,region=config.region||'auto';
   const objectPath = `${String(config.directory || 'shendu').replace(/^\/+|\/+$/g,'')}/${key}`;
-  let host, pathname;
-  if (config.pathStyle) { host = endpoint.host; pathname = `${endpoint.pathname.replace(/\/$/,'')}/${config.bucket}/${objectPath}`; }
-  else { host = `${config.bucket}.${endpoint.host}`; pathname = `${endpoint.pathname.replace(/\/$/,'')}/${objectPath}`; }
-  pathname = '/' + pathname.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  let hostname,pathname;
+  if(config.pathStyle){hostname=endpoint.hostname;pathname=`${endpoint.pathname.replace(/\/$/,'')}/${config.bucket}/${objectPath}`}
+  else{hostname=`${config.bucket}.${endpoint.hostname}`;pathname=`${endpoint.pathname.replace(/\/$/,'')}/${objectPath}`}
+  pathname='/'+pathname.split('/').filter(Boolean).map(part=>{try{return encodeURIComponent(decodeURIComponent(part))}catch{return encodeURIComponent(part)}}).join('/');
+  const host=`${hostname}${endpoint.port?`:${endpoint.port}`:''}`;
   const stamp = awsDate(new Date()), date = stamp.slice(0,8), payloadHash = createHash('sha256').update(body).digest('hex');
   const headers = { host, 'x-amz-content-sha256': payloadHash, 'x-amz-date': stamp, 'content-type': 'application/octet-stream' };
   const signedHeaders = Object.keys(headers).sort().join(';');
@@ -814,25 +959,26 @@ async function s3Request(config, key, method, body = Buffer.alloc(0)) {
   const signingKey = hmac(hmac(hmac(hmac(`AWS4${config.secretKey}`, date), region), 's3'), 'aws4_request');
   const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
   const authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  const url = `${endpoint.protocol}//${host}${pathname}`;
-  const response = await fetch(url, { method, headers: { ...headers, Authorization: authorization }, body: ['GET','HEAD'].includes(method) ? undefined : body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+  const target=new URL(endpoint.href);target.hostname=hostname;target.pathname=pathname;target.search='';target.hash='';
+  const response=await pinnedHttpsRequest(validated,target,{method,headers:{...headers,Authorization:authorization},body:['GET','HEAD'].includes(method)?Buffer.alloc(0):body});
   if (!response.ok) throw new Error(`S3 返回 ${response.status}`);
   return response;
 }
 async function uploadWebdav(config, key, body, test = false) {
-  const base = await assertPublicHttps(config.url); const dir = String(config.directory || 'shendu').replace(/^\/+|\/+$/g,'');
-  const target = new URL(`${base.href.replace(/\/$/,'')}/${dir}/${key}`);
+  const validated=await assertPublicHttps(config.url),base=validated.url,dir=String(config.directory||'shendu').replace(/^\/+|\/+$/g,'');
+  const target=new URL(base.href);target.pathname=`${base.pathname.replace(/\/$/,'')}/${dir.split('/').map(encodeURIComponent).join('/')}/${encodeURIComponent(key)}`;target.search='';target.hash='';
   const auth = 'Basic ' + Buffer.from(`${config.username}:${config.password}`).toString('base64');
-  const response = await fetch(target, { method: 'PUT', headers: { Authorization: auth, 'Content-Type': 'application/octet-stream' }, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+  const response=await pinnedHttpsRequest(validated,target,{method:'PUT',headers:{Authorization:auth,'Content-Type':'application/octet-stream'},body});
   if (!response.ok) throw new Error(`WebDAV 返回 ${response.status}`);
   if (test) {
-    const check = await fetch(target, { headers: { Authorization: auth }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
-    if (!check.ok || !Buffer.from(await check.arrayBuffer()).equals(body)) throw new Error('WebDAV 读回校验失败');
-    await fetch(target, { method: 'DELETE', headers: { Authorization: auth }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+    let validationError=null;
+    try{const check=await pinnedHttpsRequest(validated,target,{headers:{Authorization:auth}});if(!check.ok||!check.body.equals(body))throw new Error('WebDAV 读回校验失败')}catch(error){validationError=error}
+    try{const removed=await pinnedHttpsRequest(validated,target,{method:'DELETE',headers:{Authorization:auth}});if(!removed.ok&&!validationError)throw new Error(`WebDAV 测试文件清理失败（${removed.status}）`)}catch(error){if(!validationError)throw error}
+    if(validationError)throw validationError;
   }
 }
 async function runExternalBackup(target, test = false) {
-  const config = decryptSecret(target.encrypted_config); const password = getBackupPassword(target.user_id);
+  const config=normalizeBackupConfig(target.kind,decryptSecret(target.encrypted_config));const password=getBackupPassword(target.user_id);
   if (!password) throw new Error('请先设置个人备份密码');
   const body = test ? randomBytes(64) : createBackupBuffer(target.user_id, password);
   const key = test ? `connection-test-${randomUUID()}.bin` : accountBackupFilename();
@@ -840,27 +986,50 @@ async function runExternalBackup(target, test = false) {
   else {
     await s3Request(config, key, 'PUT', body);
     if (test) {
-      const check = await s3Request(config, key, 'GET');
-      if (!Buffer.from(await check.arrayBuffer()).equals(body)) throw new Error('S3 读回校验失败');
-      await s3Request(config, key, 'DELETE');
+      let validationError=null;
+      try{const check=await s3Request(config,key,'GET');if(!check.body.equals(body))throw new Error('S3 读回校验失败')}catch(error){validationError=error}
+      try{await s3Request(config,key,'DELETE')}catch(error){if(!validationError)throw error}
+      if(validationError)throw validationError;
     }
   }
 }
 
+function saveBackupOutcome(target,status,message) {
+  const stamp=now(),cleanMessage=safeText(message,300);
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    const updated=status==='success'
+      ?db.prepare(`UPDATE backup_targets SET last_run_at=?,last_success_at=?,last_error=NULL WHERE id=? AND user_id=?`).run(stamp,stamp,target.id,target.user_id)
+      :db.prepare(`UPDATE backup_targets SET last_run_at=?,last_error=? WHERE id=? AND user_id=?`).run(stamp,cleanMessage,target.id,target.user_id);
+    if(updated.changes!==1){db.exec('ROLLBACK');return false}
+    db.prepare(`INSERT INTO backup_runs VALUES(?,?,?,?,?,?)`).run(randomUUID(),target.id,target.user_id,status,cleanMessage,stamp);
+    db.prepare(`DELETE FROM backup_runs WHERE user_id=? AND id NOT IN (SELECT id FROM backup_runs WHERE user_id=? ORDER BY created_at DESC LIMIT 500)`).run(target.user_id,target.user_id);
+    db.exec('COMMIT');return true;
+  }catch(error){try{db.exec('ROLLBACK')}catch{}throw error}
+}
+
 function staticFile(req, res, pathname) {
-  const relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  if(!['GET','HEAD'].includes(req.method||'GET'))return false;
+  let relative;try{relative=pathname==='/'?'index.html':decodeURIComponent(pathname.slice(1))}catch{throw Object.assign(new Error('页面地址格式不正确'),{status:400})}
   const file = resolve(PUBLIC_DIR, relative);
-  if (!file.startsWith(PUBLIC_DIR) || !existsSync(file) || statSync(file).isDirectory()) return false;
+  if (!file.startsWith(`${PUBLIC_DIR}${sep}`) || !existsSync(file) || statSync(file).isDirectory()) return false;
   const types = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.ttf':'font/ttf','.woff2':'font/woff2' };
   const isHtml = extname(file) === '.html';
   res.writeHead(200, { 'Content-Type': types[extname(file)] || 'application/octet-stream', 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable' });
-  createReadStream(file).pipe(res); return true;
+  if(req.method==='HEAD')res.end();else createReadStream(file).pipe(res);return true;
 }
 
 async function api(req, res, url) {
   const method = req.method || 'GET'; const path = url.pathname;
+  const fetchSite=String(req.headers['sec-fetch-site']||'').toLowerCase();
+  if(fetchSite&&!['same-origin','none'].includes(fetchSite))return error(res,403,'已阻止跨站接口请求','csrf');
   if (!['GET','HEAD','OPTIONS'].includes(method)) {
-    const site = req.headers['sec-fetch-site']; if (site === 'cross-site') return error(res, 403, '已阻止跨站写入', 'csrf');
+    const origin=String(req.headers.origin||'');
+    if(origin){
+      let originUrl;try{originUrl=new URL(origin)}catch{return error(res,403,'已阻止来源不明的写入','csrf')}
+      const expectedHost=String(req.headers.host||'').toLowerCase(),expectedProtocol=String(req.headers['x-forwarded-proto']||'http').split(',')[0].trim().toLowerCase();
+      if(originUrl.host.toLowerCase()!==expectedHost||originUrl.protocol!==`${expectedProtocol}:`)return error(res,403,'已阻止跨站写入','csrf');
+    }
   }
   if (path === '/api/auth/state' && method === 'GET') {
     const user = sessionUser(req); const count = db.prepare(`SELECT COUNT(*) AS n FROM users`).get().n;
@@ -871,35 +1040,48 @@ async function api(req, res, url) {
     const body = await readJson(req); const count = db.prepare(`SELECT COUNT(*) AS n FROM users`).get().n;
     const open = db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get().value === 'true';
     if (count > 0 && !open) return error(res,403,'公开注册已关闭');
+    if(count>=MAX_USERS)return error(res,403,'本站账户数量已达上限');
     if (!checkUsername(body.username)) return error(res,400,'用户名需为 3–32 个汉字、字母、数字或 _ . -');
     if (!checkPasswordShape(body.password)) return error(res,400,'密码需为 15–128 个字符');
+    if(!masterKey)return error(res,503,masterKeyError||'服务器数据加密密钥暂不可用','data_key_unavailable');
+    if(db.prepare(`SELECT 1 FROM users WHERE username=? COLLATE NOCASE`).get(body.username.trim()))return error(res,409,'这个用户名已经存在');
     const user = { id: randomUUID(), username: body.username.trim(), display_name: safeText(body.displayName || body.username,32), role: count === 0 ? 'superadmin' : 'member', session_version: 1 };
-    try { db.prepare(`INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)`).run(user.id,user.username,user.display_name,hashPassword(body.password),user.role,now()); }
-    catch { return error(res,409,'这个用户名已经存在'); }
-    putSetting(user.id,'stage',defaultStage()); putSetting(user.id,'theme',defaultTheme()); createSession(res,user);
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      db.prepare(`INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)`).run(user.id,user.username,user.display_name,hashPassword(body.password),user.role,now());
+      putSetting(user.id,'stage',defaultStage());putSetting(user.id,'theme',defaultTheme());
+      if(count===0)db.prepare(`UPDATE schema_meta SET value='false' WHERE key='public_registration'`).run();
+      db.exec('COMMIT');
+    }catch(registerError){try{db.exec('ROLLBACK')}catch{}throw registerError}
+    createSession(res,user);
     return json(res,201,{ user: cleanUser(user) });
   }
   if (path === '/api/auth/login' && method === 'POST') {
-    if (limited(req,'login',12,15*60000)) return error(res,429,'登录尝试过多，请 15 分钟后再试');
-    const body = await readJson(req); const user = db.prepare(`SELECT * FROM users WHERE username=? COLLATE NOCASE`).get(String(body.username || '').trim());
-    if (!user || !verifyPassword(body.password || '',user.password_hash)) return error(res,401,'用户名或密码不正确');
+    const body=await readJson(req),loginName=String(body.username||'').trim(),loginBucket=createHash('sha256').update(loginName.toLocaleLowerCase()).digest('hex').slice(0,24);
+    if (limited(req,'login-total',60,15*60000)||limited(req,`login:${loginBucket}`,12,15*60000)) return error(res,429,'登录尝试过多，请 15 分钟后再试');
+    const user = db.prepare(`SELECT * FROM users WHERE username=? COLLATE NOCASE`).get(loginName);
+    const passwordMatches=verifyPassword(body.password||'',user?.password_hash||DUMMY_PASSWORD_HASH);
+    if (!user || !passwordMatches) return error(res,401,'用户名或密码不正确');
     if (user.status !== 'active') return error(res,403,'该账户已停用'); createSession(res,user); return json(res,200,{user:cleanUser(user)});
   }
   if (path === '/api/auth/logout' && method === 'POST') {
     const token = parseCookies(req).shendu_session; if (token) db.prepare(`DELETE FROM sessions WHERE token_hash=?`).run(createHash('sha256').update(token).digest('hex'));
     setSessionCookie(res,'',0); return json(res,200,{ok:true});
   }
-  const user = requireUser(req,res); if (!user) return;
-  if (path === '/api/me' && method === 'GET') return json(res,200,{ user:cleanUser(user), stage:normalizeStage(setting(user.id,'stage',defaultStage())), theme:setting(user.id,'theme',defaultTheme()) });
+  const user = requireUser(req,res); if (!user) return;req.authUser=user;
+  if (path === '/api/me' && method === 'GET') return json(res,200,{ user:cleanUser(user), stage:normalizeStage(setting(user.id,'stage',defaultStage())), theme:normalizeTheme(setting(user.id,'theme',defaultTheme())) });
   if (path === '/api/me/password' && method === 'POST') {
-    if (limited(req,'password',6,3600000)) return error(res,429,'尝试次数过多');
+    if (limited(req,`password:${user.id}`,6,3600000)) return error(res,429,'尝试次数过多');
     const body=await readJson(req); if (!verifyPassword(body.currentPassword || '',user.password_hash)) return error(res,400,'当前密码不正确');
     if (!checkPasswordShape(body.newPassword)) return error(res,400,'新密码需为 15–128 个字符');
     db.prepare(`UPDATE users SET password_hash=?,session_version=session_version+1 WHERE id=?`).run(hashPassword(body.newPassword),user.id);
     db.prepare(`DELETE FROM sessions WHERE user_id=?`).run(user.id); setSessionCookie(res,'',0); return json(res,200,{ok:true,relogin:true});
   }
   if (path === '/api/settings' && method === 'PUT') {
-    const body=await readJson(req),response={ok:true}; if (body.stage){response.stage=normalizeStage(body.stage);putSetting(user.id,'stage',response.stage)} if (body.theme) putSetting(user.id,'theme',body.theme); return json(res,200,response);
+    const body=await readJson(req),response={ok:true};
+    if(body.stage){response.stage=normalizeStage(body.stage);putSetting(user.id,'stage',response.stage)}
+    if(body.theme){response.theme=normalizeTheme(body.theme);putSetting(user.id,'theme',response.theme)}
+    return json(res,200,response);
   }
   if (path === '/api/stats' && method === 'GET') {
     const current = todayDate();
@@ -913,7 +1095,7 @@ async function api(req, res, url) {
   if (path === '/api/records' && method === 'GET') {
     const type=url.searchParams.get('type'), status=url.searchParams.get('status'), q=url.searchParams.get('q'); const args=[user.id]; let where='user_id=?';
     if(type&&validRecordType(type)){where+=' AND type=?';args.push(type)} if(status){where+=' AND status=?';args.push(status)}
-    let rows=db.prepare(`SELECT * FROM records WHERE ${where} ORDER BY period DESC,updated_at DESC LIMIT 5000`).all(...args).map(recordOut);
+    let rows=db.prepare(`SELECT * FROM records WHERE ${where} ORDER BY period DESC,updated_at DESC LIMIT ${MAX_RECORDS_PER_USER}`).all(...args).map(recordOut);
     if(q){const needle=String(q).trim().toLowerCase();rows=rows.filter(row=>`${row.title} ${JSON.stringify(row.data)} ${JSON.stringify(row.verification||{})}`.toLowerCase().includes(needle))}
     return json(res,200,{records:rows});
   }
@@ -923,12 +1105,16 @@ async function api(req, res, url) {
   if (path === '/api/records' && method === 'PUT') {
     const body=await readJson(req); if(!validRecordType(body.type)||!body.period)return error(res,400,'记录类型或周期不正确');
     if(String(body.period)!==currentPeriodFor(body.type))return error(res,400,currentPeriodMessage(body.type),'period_locked');
+    if(body.id&&!validEntityId(body.id))return error(res,400,'记录编号不正确');
     const id=body.id||randomUUID(), existing=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id);
     if(existing&&existing.status!=='draft')return error(res,409,'已完成的记录不能修改','locked');
     if(existing&&Number(body.version)!==Number(existing.version))return error(res,409,'这条记录已在其他设备更新，请刷新后再继续','version_conflict');
     const stamp=now(), version=existing?existing.version+1:1,cleanData=isPlainObject(body.data)?body.data:{};
     if('templateSnapshot' in cleanData){const snapshot=normalizeTemplateSnapshot(cleanData.templateSnapshot,body.type);if(snapshot)cleanData.templateSnapshot=snapshot;else delete cleanData.templateSnapshot}
+    if(Buffer.byteLength(JSON.stringify(cleanData))>MAX_RECORD_DATA_BYTES)return error(res,413,'单条复盘内容过大，请精简后再保存','record_too_large');
+    if(!existing&&db.prepare(`SELECT COUNT(*) AS n FROM records WHERE user_id=?`).get(user.id).n>=MAX_RECORDS_PER_USER)return error(res,403,`每个账户最多保存 ${MAX_RECORDS_PER_USER} 条复盘记录`,'record_limit_reached');
     const data=encryptData(cleanData,dataScope('record',user.id,id,'data')),title=encryptData(safeText(body.title||'',200),dataScope('record',user.id,id,'title'));
+    if(accountRecordBytes(user.id)-recordStoredBytes(existing)+Buffer.byteLength(data)+Buffer.byteLength(title)>MAX_ACCOUNT_CONTENT_BYTES)return error(res,413,'账户复盘内容已达到存储上限','account_storage_limit');
     if(existing)db.prepare(`UPDATE records SET type=?,period=?,title=?,data=?,version=?,updated_at=? WHERE id=? AND user_id=?`).run(body.type,body.period,title,data,version,stamp,id,user.id);
     else db.prepare(`INSERT INTO records(id,user_id,type,period,title,data,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,'draft',1,?,?)`).run(id,user.id,body.type,body.period,title,data,stamp,stamp);
     return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
@@ -937,31 +1123,37 @@ async function api(req, res, url) {
     const id=path.split('/')[3], row=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id); if(!row)return error(res,404,'记录不存在'); if(row.status!=='draft')return error(res,409,'记录已经完成');
     if(row.period!==currentPeriodFor(row.type))return error(res,400,currentPeriodMessage(row.type),'period_locked');
     const decoded=recordOut(row),data=decoded.data,required={daily:['today'],weekly:['plan','progress','nextThree'],monthly:['goalResult','change','bottleneck','experiment'],quarterly:['hope','evidence','choices','nextGoals'],yearly:['coordinates','expectations','keepRelease','nextYear'],decision:['decision','options','facts','expectation','failure','choice','firstStep']}[row.type]||[];
-    const missing=required.some(k=>!(data.answers?.[k]||[]).some(v=>String(v).trim()))||!String(data.action||'').trim()||(row.type==='daily'&&!String(data.ifCondition||'').trim())||!String(data.ifThen||'').trim()||!validIsoDate(data.verifyDate)||(row.type==='decision'&&!decoded.title.trim()); if(missing)return error(res,400,'请先完成所有必填项，并确认预期验证日期有效');
+    const missing=required.some(k=>!(data.answers?.[k]||[]).some(v=>String(v).trim()))||!String(data.action||'').trim()||(row.type==='daily'&&!String(data.ifCondition||'').trim())||!String(data.ifThen||'').trim()||!validIsoDate(data.verifyDate)||data.verifyDate<todayDate()||(row.type==='decision'&&!decoded.title.trim()); if(missing)return error(res,400,'请先完成所有必填项，并确认预期验证日期不早于今天');
     const normalizedSnapshot=normalizeTemplateSnapshot(data.templateSnapshot,row.type);
     if(!normalizedSnapshot){const stage=normalizeStage(setting(user.id,'stage',defaultStage()));data.templateSnapshot={version:1,review:stage.reviewTemplates[row.type],action:stage.actionTemplate}}
     else data.templateSnapshot=normalizedSnapshot;
     const stamp=now(),storedData=encryptData(data,dataScope('record',user.id,id,'data'));
+    if(accountRecordBytes(user.id)-Buffer.byteLength(row.data)+Buffer.byteLength(storedData)>MAX_ACCOUNT_CONTENT_BYTES)return error(res,413,'账户复盘内容已达到存储上限','account_storage_limit');
     db.prepare(`UPDATE records SET data=?,status='completed',version=version+1,completed_at=?,updated_at=? WHERE id=?`).run(storedData,stamp,stamp,id); return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
   }
   if (/^\/api\/records\/[^/]+\/verify$/.test(path) && method === 'POST') {
-    const id=path.split('/')[3], row=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id); if(!row)return error(res,404,'记录不存在'); if(row.status!=='completed')return error(res,409,'只有待验证记录可以提交结果');
-    const body=await readJson(req); if(!safeText(body.result).trim()||!safeText(body.adjustment).trim()||(row.type==='decision'&&(!['好','差'].includes(body.outcome)||!['好','差'].includes(body.process))))return error(res,400,'请完整填写验证结果');
+    const id=path.split('/')[3],body=await readJson(req),row=db.prepare(`SELECT * FROM records WHERE id=? AND user_id=?`).get(id,user.id);if(!row)return error(res,404,'记录不存在');if(row.status!=='completed')return error(res,409,'只有待验证记录可以提交结果');
+    if(!safeText(body.result).trim()||!safeText(body.adjustment).trim()||(row.type==='decision'&&(!['好','差'].includes(body.outcome)||!['好','差'].includes(body.process))))return error(res,400,'请完整填写验证结果');
     const stamp=now(),decoded=recordOut(row),verification=encryptData({result:safeText(body.result),adjustment:safeText(body.adjustment),outcome:body.outcome||null,process:body.process||null,expectedDate:decoded.data.verifyDate||null,actualAt:stamp},dataScope('record',user.id,id,'verification'));
-    db.prepare(`UPDATE records SET status='verified',verification=?,verified_at=?,updated_at=?,version=version+1 WHERE id=?`).run(verification,stamp,stamp,id);
+    if(accountRecordBytes(user.id)-Buffer.byteLength(row.verification||'')+Buffer.byteLength(verification)>MAX_ACCOUNT_CONTENT_BYTES)return error(res,413,'账户复盘内容已达到存储上限','account_storage_limit');
+    const updated=db.prepare(`UPDATE records SET status='verified',verification=?,verified_at=?,updated_at=?,version=version+1 WHERE id=? AND user_id=? AND status='completed'`).run(verification,stamp,stamp,id,user.id);
+    if(updated.changes!==1)return error(res,409,'这条行动已经被其他请求验证，请刷新后查看','already_verified');
     return json(res,200,{record:recordOut(db.prepare(`SELECT * FROM records WHERE id=?`).get(id))});
   }
   if (path === '/api/backup/password' && method === 'POST') {
     const body=await readJson(req); if(!checkPasswordShape(body.password))return error(res,400,'备份密码需为 15–128 个字符'); putSetting(user.id,'backup_secret',encryptSecret({password:body.password,createdAt:now()})); return json(res,200,{ok:true});
   }
   if (path === '/api/backup/status' && method === 'GET') return json(res,200,getBackupStatus(user.id));
-  if (path === '/api/backup/export' && method === 'GET') {
+  if (path === '/api/backup/export' && method === 'POST') {
+    if(limited(req,`backup-export:${user.id}`,12,3600000))return error(res,429,'备份导出次数过多，请稍后再试');
+    await readJson(req);
     const password=getBackupPassword(user.id); if(!password)return error(res,400,'请先设置备份密码'); const body=createBackupBuffer(user.id,password);
+    if(body.length>MAX_BACKUP_FILE_BYTES)return error(res,413,'个人备份超过 36 MB，无法生成可恢复的文件');
     const filename=accountBackupFilename();
     res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="shendu-account-${todayDate()}.shendu"; filename*=UTF-8''${encodeURIComponent(filename)}`,'Content-Length':body.length,'Cache-Control':'no-store'}); return res.end(body);
   }
   if (path === '/api/data/inspect' && method === 'POST') {
-    if (limited(req,'backup-inspect',20,3600000)) return error(res,429,'备份校验次数过多，请稍后再试');
+    if (limited(req,`backup-inspect:${user.id}`,20,3600000)) return error(res,429,'备份校验次数过多，请稍后再试');
     const body=await readJson(req,MAX_BACKUP_REQUEST_BYTES);
     try {
       const parsed=parseBackupBuffer(backupTextFrom(body.encryptedBackup),backupPasswordFrom(body.password));
@@ -971,7 +1163,7 @@ async function api(req, res, url) {
     } catch(e) { return error(res,e.status||400,e.message||'无法校验这份备份',e.code||'backup_inspect_failed'); }
   }
   if (path === '/api/data/import' && method === 'POST') {
-    if (limited(req,'backup-import',10,3600000)) return error(res,429,'备份恢复次数过多，请稍后再试');
+    if (limited(req,`backup-import:${user.id}`,10,3600000)) return error(res,429,'备份恢复次数过多，请稍后再试');
     const body=await readJson(req,MAX_BACKUP_REQUEST_BYTES);
     if (!['merge','replace'].includes(body.mode)) return error(res,400,'请选择安全合并或完整恢复');
     if (body.mode==='replace'&&body.confirmation!=='RESTORE') return error(res,400,'完整恢复需要再次确认');
@@ -984,7 +1176,7 @@ async function api(req, res, url) {
   }
   if (path === '/api/admin/site-backup/export' && method === 'POST') {
     if(user.role!=='superadmin')return error(res,403,'只有超级管理员可以导出整站备份','forbidden');
-    if(limited(req,'site-backup-export',4,3600000))return error(res,429,'整站备份导出次数过多，请稍后再试');
+    if(limited(req,`site-backup-export:${user.id}`,4,3600000))return error(res,429,'整站备份导出次数过多，请稍后再试');
     const body=await readJson(req);
     if(!verifyPassword(body.currentPassword||'',user.password_hash))return error(res,400,'当前超级管理员登录密码不正确','current_password_invalid');
     if(!checkPasswordShape(body.backupPassword))return error(res,400,'整站备份密码需为 15–128 个字符');
@@ -997,14 +1189,14 @@ async function api(req, res, url) {
   }
   if (path === '/api/admin/site-backup/inspect' && method === 'POST') {
     if(user.role!=='superadmin')return error(res,403,'只有超级管理员可以校验整站备份','forbidden');
-    if(limited(req,'site-backup-inspect',10,3600000))return error(res,429,'整站备份校验次数过多，请稍后再试');
+    if(limited(req,`site-backup-inspect:${user.id}`,10,3600000))return error(res,429,'整站备份校验次数过多，请稍后再试');
     const body=await readJson(req,MAX_SITE_BACKUP_REQUEST_BYTES);
     try{return json(res,200,siteBackupPreview(parseSiteBackupBuffer(siteBackupTextFrom(body.encryptedBackup),body.backupPassword)))}
     catch(e){return error(res,e.status||400,e.message||'无法校验整站备份',e.code||'site_backup_inspect_failed')}
   }
   if (path === '/api/admin/site-backup/restore' && method === 'POST') {
     if(user.role!=='superadmin')return error(res,403,'只有超级管理员可以恢复整站备份','forbidden');
-    if(limited(req,'site-backup-restore',5,3600000))return error(res,429,'整站恢复尝试次数过多，请稍后再试');
+    if(limited(req,`site-backup-restore:${user.id}`,5,3600000))return error(res,429,'整站恢复尝试次数过多，请稍后再试');
     const body=await readJson(req,MAX_SITE_BACKUP_REQUEST_BYTES);
     if(!verifyPassword(body.currentPassword||'',user.password_hash))return error(res,400,'当前超级管理员登录密码不正确','current_password_invalid');
     if(body.confirmation!=='RESTORE_SITE')return error(res,400,'请确认将完整替换本站全部资料','site_restore_confirmation_required');
@@ -1014,19 +1206,30 @@ async function api(req, res, url) {
     }catch(e){return error(res,e.status||400,e.message||'无法恢复整站备份',e.code||'site_backup_restore_failed')}
   }
   if (path === '/api/backup/upload/start' && method === 'POST') {
+    if(limited(req,`backup-upload:${user.id}`,12,3600000))return error(res,429,'备份上传任务创建过多，请稍后再试');
+    const activeUploads=readdirSync(TMP_DIR).filter(name=>name.startsWith(`${user.id}-`)&&name.endsWith('.upload')).length;
+    if(activeUploads>=3)return error(res,429,'最多同时保留 3 个备份上传任务，请完成或等待旧任务自动清理');
     const id=randomUUID(); writeFileSync(join(TMP_DIR,`${user.id}-${id}.upload`),''); return json(res,200,{uploadId:id,chunkSize:4194304});
   }
   if (/^\/api\/backup\/upload\/[^/]+\/chunk$/.test(path) && method === 'POST') {
-    const id=path.split('/')[4], file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效'); const chunk=await readBody(req,5*1024*1024);
+    const id=path.split('/')[4];if(!validEntityId(id))return error(res,400,'上传任务编号不正确');
+    if(limited(req,`backup-chunk:${user.id}`,180,3600000))return error(res,429,'备份上传请求过多，请稍后再试');
+    const file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效'); const chunk=await readBody(req,5*1024*1024);
+    if(sessionUser(req)?.id!==user.id)return error(res,401,'登录已失效，请重新登录','unauthorized');
     if(statSync(file).size+chunk.length>MAX_BACKUP_FILE_BYTES){try{unlinkSync(file)}catch{}return error(res,413,'备份文件超过 36 MB，无法导入')}
     appendFileSync(file,chunk); return json(res,200,{received:chunk.length});
   }
   if (/^\/api\/backup\/upload\/[^/]+\/preview$/.test(path) && method === 'POST') {
-    const id=path.split('/')[4], file=join(TMP_DIR,`${user.id}-${id}.upload`), password=String(req.headers['x-backup-password']||getBackupPassword(user.id)||''); if(!existsSync(file))return error(res,404,'上传任务已失效'); if(!password)return error(res,400,'请输入这份备份的密码');
+    const id=path.split('/')[4];if(!validEntityId(id))return error(res,400,'上传任务编号不正确');
+    if(limited(req,`backup-preview:${user.id}`,20,3600000))return error(res,429,'备份校验次数过多，请稍后再试');
+    const file=join(TMP_DIR,`${user.id}-${id}.upload`), password=String(req.headers['x-backup-password']||getBackupPassword(user.id)||''); if(!existsSync(file))return error(res,404,'上传任务已失效'); if(!password)return error(res,400,'请输入这份备份的密码');
     try { const parsed=parseBackupBuffer(readFileSync(file),password),preview=backupPreview(parsed,user); if(!checkUsername(preview.ownerUsername))return error(res,400,'这份备份没有可验证的所属用户名，无法恢复。请先在原账户恢复后重新导出新版备份。','backup_owner_missing'); return json(res,200,preview); } catch(e){return error(res,e.status||400,e.message,e.code||'backup_inspect_failed')}
   }
   if (/^\/api\/backup\/upload\/[^/]+\/apply$/.test(path) && method === 'POST') {
-    const id=path.split('/')[4], file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效'); const body=await readJson(req); const password=String(body.password||getBackupPassword(user.id)||''); if(!password)return error(res,400,'请输入这份备份的密码');
+    const id=path.split('/')[4];if(!validEntityId(id))return error(res,400,'上传任务编号不正确');
+    if(limited(req,`backup-apply:${user.id}`,10,3600000))return error(res,429,'备份恢复次数过多，请稍后再试');
+    const file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效'); const body=await readJson(req); const password=String(body.password||getBackupPassword(user.id)||''); if(!password)return error(res,400,'请输入这份备份的密码');
+    if(!['merge','replace'].includes(body.mode))return error(res,400,'请选择安全合并或完整恢复');
     if(body.mode==='replace'&&body.confirmation!=='RESTORE')return error(res,400,'完整恢复需要再次确认');
     try { const parsed=parseBackupBuffer(readFileSync(file),password); assertBackupOwner(user,parsed,body.sourceUsername); const count=applyBackup(user.id,parsed,body.mode==='replace'?'replace':'merge'); unlinkSync(file); return json(res,200,{ok:true,count}); } catch(e){return error(res,e.status||400,e.message,e.code||'backup_import_failed')}
   }
@@ -1035,42 +1238,57 @@ async function api(req, res, url) {
   }
   if (path === '/api/backup/targets' && method === 'POST') {
     const body=await readJson(req); if(!['webdav','s3'].includes(body.kind))return error(res,400,'目标类型不正确'); if(db.prepare(`SELECT COUNT(*) AS n FROM backup_targets WHERE user_id=?`).get(user.id).n>=8)return error(res,400,'最多设置 8 个外部目标');
-    const id=randomUUID(),stamp=now(); db.prepare(`INSERT INTO backup_targets(id,user_id,name,kind,encrypted_config,schedule,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`).run(id,user.id,safeText(body.name,80),body.kind,encryptSecret(body.config||{}),['manual','daily','weekly'].includes(body.schedule)?body.schedule:'manual',body.enabled===false?0:1,stamp,stamp); return json(res,201,{id});
+    const name=safeText(body.name,80).trim();if(!name)return error(res,400,'请填写备份目标名称');
+    let config;try{config=normalizeBackupConfig(body.kind,body.config)}catch(validationError){return error(res,400,validationError.message,'backup_target_invalid')}
+    const id=randomUUID(),stamp=now(); db.prepare(`INSERT INTO backup_targets(id,user_id,name,kind,encrypted_config,schedule,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`).run(id,user.id,name,body.kind,encryptSecret(config),['manual','daily','weekly'].includes(body.schedule)?body.schedule:'manual',body.enabled===false?0:1,stamp,stamp); return json(res,201,{id});
   }
   if (/^\/api\/backup\/targets\/[^/]+$/.test(path) && method === 'PATCH') {
     const id=path.split('/')[4], body=await readJson(req), target=db.prepare(`SELECT * FROM backup_targets WHERE id=? AND user_id=?`).get(id,user.id); if(!target)return error(res,404,'备份目标不存在');
     const kind=['webdav','s3'].includes(body.kind)?body.kind:target.kind, schedule=['manual','daily','weekly'].includes(body.schedule)?body.schedule:target.schedule;
-    db.prepare(`UPDATE backup_targets SET name=?,kind=?,encrypted_config=?,schedule=?,enabled=?,updated_at=? WHERE id=? AND user_id=?`).run(safeText(body.name||target.name,80),kind,body.config?encryptSecret(body.config):target.encrypted_config,schedule,body.enabled===false?0:1,now(),id,user.id); return json(res,200,{ok:true});
+    const name=safeText(body.name||target.name,80).trim();if(!name)return error(res,400,'请填写备份目标名称');
+    if(kind!==target.kind&&!body.config)return error(res,400,'切换目标类型时必须重新填写连接配置');
+    let encryptedConfig=target.encrypted_config;
+    if(body.config){try{encryptedConfig=encryptSecret(normalizeBackupConfig(kind,body.config))}catch(validationError){return error(res,400,validationError.message,'backup_target_invalid')}}
+    db.prepare(`UPDATE backup_targets SET name=?,kind=?,encrypted_config=?,schedule=?,enabled=?,updated_at=? WHERE id=? AND user_id=?`).run(name,kind,encryptedConfig,schedule,body.enabled===false?0:1,now(),id,user.id); return json(res,200,{ok:true});
   }
   if (/^\/api\/backup\/targets\/[^/]+$/.test(path) && method === 'DELETE') { const id=path.split('/')[4]; db.prepare(`DELETE FROM backup_targets WHERE id=? AND user_id=?`).run(id,user.id); return json(res,200,{ok:true}); }
   if (/^\/api\/backup\/targets\/[^/]+\/(test|run)$/.test(path) && method === 'POST') {
     const [,,, ,id,action]=path.split('/'); const target=db.prepare(`SELECT * FROM backup_targets WHERE id=? AND user_id=?`).get(id,user.id); if(!target)return error(res,404,'备份目标不存在');
-    try { await runExternalBackup(target,action==='test'); const stamp=now(); db.prepare(`UPDATE backup_targets SET last_run_at=?,last_success_at=?,last_error=NULL WHERE id=?`).run(stamp,stamp,id); db.prepare(`INSERT INTO backup_runs VALUES(?,?,?,?,?,?)`).run(randomUUID(),id,user.id,'success',action==='test'?'连接测试成功':'备份成功',stamp); return json(res,200,{ok:true}); }
-    catch(e){const stamp=now();db.prepare(`UPDATE backup_targets SET last_run_at=?,last_error=? WHERE id=?`).run(stamp,safeText(e.message,300),id);db.prepare(`INSERT INTO backup_runs VALUES(?,?,?,?,?,?)`).run(randomUUID(),id,user.id,'error',safeText(e.message,300),stamp);return error(res,400,e.message)}
+    try { await runExternalBackup(target,action==='test'); if(!saveBackupOutcome(target,'success',action==='test'?'连接测试成功':'备份成功'))return error(res,409,'备份目标已被删除'); return json(res,200,{ok:true}); }
+    catch(e){saveBackupOutcome(target,'error',e.message);return error(res,400,e.message)}
   }
   if (path === '/api/admin/users' && method === 'GET') {
-    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const q=url.searchParams.get('q')||''; return json(res,200,{users:db.prepare(`SELECT id,username,display_name,role,status,created_at FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY created_at DESC`).all(`%${q}%`,`%${q}%`).map(cleanUser),registrationOpen:db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get().value==='true'});
+    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const q=safeText(url.searchParams.get('q')||'',100); return json(res,200,{users:db.prepare(`SELECT id,username,display_name,role,status,created_at FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY created_at DESC`).all(`%${q}%`,`%${q}%`).map(cleanUser),registrationOpen:db.prepare(`SELECT value FROM schema_meta WHERE key='public_registration'`).get().value==='true'});
   }
   if (path === '/api/admin/users' && method === 'POST') {
-    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const body=await readJson(req); if(!checkUsername(body.username)||!checkPasswordShape(body.password))return error(res,400,'请检查用户名与密码'); const role=body.role==='admin'&&user.role==='superadmin'?'admin':'member';
-    try{db.prepare(`INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)`).run(randomUUID(),body.username,safeText(body.displayName||body.username,32),hashPassword(body.password),role,now());return json(res,201,{ok:true})}catch{return error(res,409,'用户名已存在')}
+    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限');if(limited(req,`user-create:${user.id}`,30,3600000))return error(res,429,'创建账户次数过多，请稍后再试');
+    const body=await readJson(req),actor=db.prepare(`SELECT role,status FROM users WHERE id=?`).get(user.id);if(!actor||actor.status!=='active'||!['admin','superadmin'].includes(actor.role))return error(res,403,'权限已经变化，请重新登录');
+    if(db.prepare(`SELECT COUNT(*) AS n FROM users`).get().n>=MAX_USERS)return error(res,403,'本站账户数量已达上限');
+    if(!checkUsername(body.username)||!checkPasswordShape(body.password))return error(res,400,'请检查用户名与密码'); const role=body.role==='admin'&&actor.role==='superadmin'?'admin':'member';
+    if(db.prepare(`SELECT 1 FROM users WHERE username=? COLLATE NOCASE`).get(body.username))return error(res,409,'用户名已存在');
+    const newUserId=randomUUID();db.exec('BEGIN IMMEDIATE');
+    try{db.prepare(`INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)`).run(newUserId,body.username,safeText(body.displayName||body.username,32),hashPassword(body.password),role,now());putSetting(newUserId,'stage',defaultStage());putSetting(newUserId,'theme',defaultTheme());db.exec('COMMIT');return json(res,201,{ok:true})}
+    catch(createError){try{db.exec('ROLLBACK')}catch{}throw createError}
   }
   if (/^\/api\/admin\/users\/[^/]+$/.test(path) && method === 'PATCH') {
-    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const id=path.split('/')[4],target=db.prepare(`SELECT * FROM users WHERE id=?`).get(id); if(!target||target.id===user.id||target.role==='superadmin'||(user.role==='admin'&&target.role==='admin'))return error(res,403,'不能管理该账户'); const body=await readJson(req);
+    if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限'); const id=path.split('/')[4],body=await readJson(req),actor=db.prepare(`SELECT role,status FROM users WHERE id=?`).get(user.id),target=db.prepare(`SELECT * FROM users WHERE id=?`).get(id);
+    if(!actor||actor.status!=='active'||!['admin','superadmin'].includes(actor.role))return error(res,403,'权限已经变化，请重新登录');
+    if(!target||target.id===user.id||target.role==='superadmin'||(actor.role==='admin'&&target.role==='admin'))return error(res,403,'不能管理该账户');
+    if(body.password&&!checkPasswordShape(body.password))return error(res,400,'密码需为 15–128 个字符');
     if(body.status&&['active','disabled'].includes(body.status))db.prepare(`UPDATE users SET status=?,session_version=session_version+1 WHERE id=?`).run(body.status,id);
-    if(body.role&&user.role==='superadmin'&&['admin','member'].includes(body.role))db.prepare(`UPDATE users SET role=?,session_version=session_version+1 WHERE id=?`).run(body.role,id);
-    if(body.password){if(!checkPasswordShape(body.password))return error(res,400,'密码需为 15–128 个字符');db.prepare(`UPDATE users SET password_hash=?,session_version=session_version+1 WHERE id=?`).run(hashPassword(body.password),id)} db.prepare(`DELETE FROM sessions WHERE user_id=?`).run(id); return json(res,200,{ok:true});
+    if(body.role&&actor.role==='superadmin'&&['admin','member'].includes(body.role))db.prepare(`UPDATE users SET role=?,session_version=session_version+1 WHERE id=?`).run(body.role,id);
+    if(body.password)db.prepare(`UPDATE users SET password_hash=?,session_version=session_version+1 WHERE id=?`).run(hashPassword(body.password),id); db.prepare(`DELETE FROM sessions WHERE user_id=?`).run(id); return json(res,200,{ok:true});
   }
   if (/^\/api\/admin\/users\/[^/]+$/.test(path) && method === 'DELETE') {
     if(!['admin','superadmin'].includes(user.role))return error(res,403,'没有权限');
     if(limited(req,`user-delete:${user.id}`,6,3600000))return error(res,429,'删除验证次数过多，请稍后再试');
-    const id=path.split('/')[4],target=db.prepare(`SELECT * FROM users WHERE id=?`).get(id);
+    const id=path.split('/')[4],body=await readJson(req),actor=db.prepare(`SELECT role,status,password_hash FROM users WHERE id=?`).get(user.id),target=db.prepare(`SELECT * FROM users WHERE id=?`).get(id);
+    if(!actor||actor.status!=='active'||!['admin','superadmin'].includes(actor.role))return error(res,403,'权限已经变化，请重新登录');
     if(!target)return error(res,404,'账户不存在');
     if(target.id===user.id)return error(res,403,'不能删除当前登录账户');
     if(target.role==='superadmin')return error(res,403,'不能删除超级管理员账户');
-    if(user.role==='admin'&&target.role==='admin')return error(res,403,'管理员不能删除其他管理员');
-    const body=await readJson(req);
-    if(!verifyPassword(body.currentPassword||'',user.password_hash))return error(res,400,'当前登录密码不正确','current_password_invalid');
+    if(actor.role==='admin'&&target.role==='admin')return error(res,403,'管理员不能删除其他管理员');
+    if(!verifyPassword(body.currentPassword||'',actor.password_hash))return error(res,400,'当前登录密码不正确','current_password_invalid');
     const confirmation=String(body.confirmationUsername||'').trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
     const expected=String(target.username).trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
     if(confirmation!==expected)return error(res,400,'确认用户名与待删除账户不一致','username_confirmation_invalid');
@@ -1093,29 +1311,33 @@ async function api(req, res, url) {
 }
 
 const server = http.createServer(async (req,res) => {
-  const nonce = randomBytes(12).toString('base64');
   res.setHeader('X-Content-Type-Options','nosniff'); res.setHeader('X-Frame-Options','DENY'); res.setHeader('Referrer-Policy','same-origin');
   res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`);
+  res.setHeader('Cross-Origin-Opener-Policy','same-origin');res.setHeader('Cross-Origin-Resource-Policy','same-origin');res.setHeader('X-Permitted-Cross-Domain-Policies','none');
+  res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   try {
+    const requestTarget=req.url||'/';if(!requestTarget.startsWith('/')||requestTarget.startsWith('//'))return error(res,400,'请求地址格式不正确');
+    const url=new URL(requestTarget,'http://localhost');
     if (url.pathname === '/healthz') return masterKey?json(res,200,{ok:true,schema:6,dataEncryption:'AES-256-GCM'}):json(res,503,{ok:false,schema:6,error:'data_key_unavailable'});
     if (url.pathname.startsWith('/api/')) return await api(req,res,url);
     if (staticFile(req,res,url.pathname)) return;
     if (req.method === 'GET') return staticFile(req,res,'/');
     return error(res,404,'页面不存在');
-  } catch (e) { console.error(e); if(!res.headersSent) error(res,e.status||500,e.status?e.message:'服务器暂时无法完成请求','server_error'); else res.end(); }
+  } catch (e) { if(!e.status||e.status>=500)console.error(e);if(!res.headersSent)error(res,e.status||500,e.status?e.message:'服务器暂时无法完成请求',e.code||'server_error');else res.end(); }
 });
 
 const cleanup = () => {
   db.prepare(`DELETE FROM sessions WHERE expires_at<?`).run(now());
   for (const name of readdirSync(TMP_DIR)) { const file=join(TMP_DIR,name); try{if(statSync(file).isFile()&&Date.now()-statSync(file).mtimeMs>3600000)unlinkSync(file)}catch{} }
+  const stamp=Date.now();for(const [key,value] of rateMap)if(value.until<stamp)rateMap.delete(key);
 };
 const scheduledBackups = async () => {
   const targets=db.prepare(`SELECT * FROM backup_targets WHERE enabled=1 AND schedule!='manual'`).all();
-  for(const t of targets){const last=t.last_run_at?Date.parse(t.last_run_at):0,interval=t.schedule==='daily'?86400000:7*86400000;if(Date.now()-last<interval)continue;try{await runExternalBackup(t,false);const stamp=now();db.prepare(`UPDATE backup_targets SET last_run_at=?,last_success_at=?,last_error=NULL WHERE id=?`).run(stamp,stamp,t.id);db.prepare(`INSERT INTO backup_runs VALUES(?,?,?,?,?,?)`).run(randomUUID(),t.id,t.user_id,'success','定时备份成功',stamp)}catch(e){const stamp=now();db.prepare(`UPDATE backup_targets SET last_run_at=?,last_error=? WHERE id=?`).run(stamp,safeText(e.message,300),t.id);db.prepare(`INSERT INTO backup_runs VALUES(?,?,?,?,?,?)`).run(randomUUID(),t.id,t.user_id,'error',safeText(e.message,300),stamp)}}
+  for(const t of targets){const last=t.last_run_at?Date.parse(t.last_run_at):0,interval=t.schedule==='daily'?86400000:7*86400000;if(Date.now()-last<interval)continue;try{await runExternalBackup(t,false);saveBackupOutcome(t,'success','定时备份成功')}catch(e){try{saveBackupOutcome(t,'error',e.message)}catch(saveError){console.error('定时备份状态写入失败',saveError)}}}
 };
-setInterval(cleanup,15*60000).unref(); setInterval(scheduledBackups,60*60000).unref(); cleanup();
+let scheduledBackupRunning=false;
+const runScheduledBackups=async()=>{if(scheduledBackupRunning)return;scheduledBackupRunning=true;try{await scheduledBackups()}catch(error){console.error('定时备份任务失败',error)}finally{scheduledBackupRunning=false}};
+setInterval(cleanup,15*60000).unref(); setInterval(runScheduledBackups,60*60000).unref(); cleanup();
 server.listen(PORT,'0.0.0.0',()=>console.log(`慎独已启动：http://0.0.0.0:${PORT}`));
 const shutdown=()=>server.close(()=>{db.close();process.exit(0)}); process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);

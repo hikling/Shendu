@@ -400,23 +400,7 @@ body.reduce-motion *,body.reduce-motion *:before,body.reduce-motion *:after{anim
   border:1px solid color-mix(in srgb,var(--space-tone) 22%,#fff);
   border-radius:14px;
 }
-.space-head-mark strong{position:relative;font-size:1.45rem;line-height:1;letter-spacing:.08em}
-.space-head-mark small{
-  position:absolute;
-  right:-7px;
-  bottom:-7px;
-  display:grid;
-  place-items:center;
-  min-width:28px;
-  height:22px;
-  padding:0 5px;
-  border:2px solid var(--sheet);
-  border-radius:8px;
-  background:var(--space-tone);
-  color:var(--space-contrast,#fff);
-  font:700 .56rem/1 ui-monospace,monospace;
-  letter-spacing:.06em;
-}
+.space-head-mark strong{position:relative;font-size:1.45rem;line-height:1;letter-spacing:0;transform:translateY(-1px)}
 .space-head-copy{position:relative;z-index:2;min-width:0}
 .space-head-copy h1{margin:0;font-size:1.42rem;line-height:1.3;letter-spacing:.08em}
 .space-head-copy p{max-width:620px;margin:6px 0 0;color:var(--ink-2);font-size:.76rem;line-height:1.65}

@@ -11,15 +11,16 @@
 - 历史搜索与类型、年份、月份筛选；筛选栏在电脑与手机上自动重排，避免文字与下拉箭头挤压
 - 所有书写控件统一使用日记正文的字体与字号，阶段指标输入框固定高度并与状态选项对齐
 - 六套三色主题、自定义颜色、减少动态效果
-- `code.html` 同款 Great Vibes / Pinyon Script / Alex Brush 艺术字体已随安装包本地提供，不依赖访问外部字体站点
-- 用户注册登录、首位用户自动成为超级管理员、成员/管理员权限；管理员可在密码与用户名双重确认后永久删除授权范围内的账户及其关联数据
+- `code.html` 同款 Great Vibes / Pinyon Script / Alex Brush 艺术字体已随安装包本地提供；页面不加载第三方字体或统计脚本
+- 用户注册登录、首位用户自动成为超级管理员并自动关闭公开注册、成员/管理员权限；管理员可在密码与用户名双重确认后永久删除授权范围内的账户及其关联数据
 - 账户管理、阶段设置、备份弹窗和全部表单针对手机窄屏自适应，账户列表在移动端自动转为卡片布局
 - 复盘标题、正文、日记、验证结果和个人设置落盘前使用 AES-256-GCM 加密；旧版明文数据库首次启动时自动迁移并清理旧页
 - 个人 `.shendu` v4 整包加密导出、浏览器校验、安全合并与完整恢复；用户名只写入加密载荷，跨账户恢复必须再次确认原用户名与原备份密码，并兼容 v3 及更早加密备份
 - 超级管理员可在网页导出、校验并恢复 `.shendu-site` 整站加密迁移包，一次迁移全部账户、密码摘要、复盘、设置和外部备份配置
 - 每次服务器更新时询问是否生成 `.shendu-db` 整站加密快照；只有确认后才备份，备份失败时停止更新
 - WebDAV 与 S3 兼容存储（R2、AWS S3、MinIO 等），连接读写校验和定时备份
-- SQLite WAL、健康检查、安全响应头、同源写入检查、登录限速
+- SQLite WAL、健康检查、安全响应头、严格同源写入检查、登录限速、上传任务限额与容器日志轮换
+- 单账户最多 10,000 条复盘、32 MiB 加密正文容量，单条复盘最多 1 MiB；超限会明确报错，避免异常上传耗尽服务器资源
 - Debian + Docker Compose + Caddy 自动 HTTPS
 
 ## Debian 12 / 13 部署
@@ -259,6 +260,8 @@ docker compose ps
 - Caddy 证书：Docker 卷 `caddy_data`
 - 临时导入文件：`./tmp`，完成、取消或空闲一小时后清理
 
+账户用户名、称呼、权限、记录类型与日期等运行所需元数据保存在数据库中；复盘标题、正文、日记、验证内容、个人设置及外部备份凭据会加密。整站和个人导出文件均为独立密码加密的整包。服务器拥有数据主密钥，取得服务器管理权限的人仍可读取运行中的资料；请妥善保护服务器和 `backup-master.key`。
+
 ### 网页整站迁移（推荐）
 
 1. 在旧站用超级管理员进入“数据备份”，选择“导出整站备份”，输入当前登录密码并设置一个独立的整站备份密码。
@@ -290,14 +293,12 @@ ls -lh /opt/Shendu/shendu/backups/
 ```bash
 cd /opt/Shendu/shendu
 backup_file="/opt/Shendu/shendu/backups/要恢复的文件.shendu-db"
-backup_password="$(tr -d '\r\n' < ./data/server-backup.password)"
 install -m 600 "$backup_file" ./tmp/restore.shendu-db
 docker compose stop shendu
 docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs restore \
-  /app/tmp/restore.shendu-db "$backup_password"
+  /app/tmp/restore.shendu-db --password-file /app/data/server-backup.password
 docker compose up -d
 rm -f ./tmp/restore.shendu-db
-unset backup_password
 ```
 
 恢复命令会保留 `shendu.db.before-restore`，注销旧会话，并把快照中的内部数据密钥恢复到 `./data/backup-master.key`。`.shendu-db` 使用命令行恢复；网页上传恢复使用网页导出的 `.shendu-site`。
@@ -322,6 +323,7 @@ R2 常用填写方式：
 - 停用账号、重置密码和修改本人密码都会使旧会话失效。
 - 当前版本只提供站内验证日期，不发送短信、邮件、微信或系统推送。
 - 当前版本不调用 GPT，也没有用户间查看、点赞或评论功能。
+- 除非你主动配置 WebDAV 或 S3 外部备份，网页与服务端不会向第三方服务发送资料；外部备份地址会经过 HTTPS、公网 IP 与 DNS 固定校验。
 
 ## 本地开发
 

@@ -7,5 +7,6 @@ backups/
 *.log
 *.zip
 *.shendu
+*.shendu-site
 *.shendu-db
 .DS_Store

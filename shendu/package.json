@@ -1,6 +1,6 @@
 {
   "name": "shendu-journal",
-  "version": "5.3.6",
+  "version": "5.3.7",
   "private": true,
   "type": "module",
   "description": "慎独：自托管个人复盘系统",

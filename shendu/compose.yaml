@@ -3,6 +3,8 @@ services:
     build: .
     container_name: shendu
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       TZ: Asia/Shanghai
@@ -11,6 +13,11 @@ services:
       - ./data:/app/data
       - ./tmp:/app/tmp
     networks: [shendu_net]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -29,6 +36,11 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks: [shendu_net]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 networks:
   shendu_net:

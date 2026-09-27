@@ -37,6 +37,9 @@ cleanup() {
   if [ -n "${backup_temp_file:-}" ] && [ -f "$backup_temp_file" ]; then
     rm -f -- "$backup_temp_file"
   fi
+  if [ "${update_lock_acquired:-0}" = "1" ] && [ -n "${update_lock_dir:-}" ] && [ -d "$update_lock_dir" ]; then
+    rmdir -- "$update_lock_dir" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
@@ -52,6 +55,12 @@ command -v git >/dev/null 2>&1 || fail "服务器没有安装 git。请先执行
 [ -d "$repo_dir/.git" ] || fail "$repo_dir 不是 Git 克隆目录。ZIP 解压版不能执行 git pull，请按 README 的“ZIP 旧部署迁移”处理。"
 [ -f "$app_dir/compose.yaml" ] || fail "缺少 $app_dir/compose.yaml，项目目录可能填写错误。"
 [ -f "$app_dir/.env" ] || fail "缺少 $app_dir/.env。为防止覆盖域名与加密密钥，脚本已停止。"
+mkdir -p "$app_dir/tmp"
+update_lock_dir="$app_dir/tmp/.update.lock"
+if ! mkdir "$update_lock_dir" 2>/dev/null; then
+  fail "检测到另一个更新任务正在运行。如果确认没有更新进程，请删除 $update_lock_dir 后重试。"
+fi
+update_lock_acquired=1
 
 branch="$(git_in_repo symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [ "$branch" = "main" ] || fail "当前分支是 ${branch:-游离状态}，不是 main。请先确认服务器上的代码来源。"
@@ -102,9 +111,9 @@ case "$backup_choice" in
     backup_container_file="/app/tmp/$backup_name"
     backup_temp_file="$app_dir/tmp/$backup_name"
     backup_output_file="$app_dir/backups/$backup_name"
-    if ! docker compose exec -T shendu node scripts/admin-cli.mjs snapshot "$backup_container_file" "$backup_password"; then
+    if ! docker compose exec -T -u root shendu node scripts/admin-cli.mjs snapshot "$backup_container_file" --password-file /app/data/server-backup.password; then
       echo "运行中的应用容器不可用，正在使用临时容器创建整站快照……" >&2
-      if ! docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs snapshot "$backup_container_file" "$backup_password"; then
+      if ! docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs snapshot "$backup_container_file" --password-file /app/data/server-backup.password; then
         fail "无法创建更新前整站备份；代码和容器均未更新。"
       fi
     fi

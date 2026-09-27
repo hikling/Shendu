@@ -32,23 +32,29 @@ fi
 
 [ "${#backup_password}" -ge 15 ] || { echo "整站备份密码不能少于 15 个字符" >&2; exit 1; }
 
-stamp="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)"
+stamp="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)-$$"
 filename="shendu-full-site-$reason-$stamp.shendu-db"
 container_file="/app/tmp/$filename"
 host_temp="$app_dir/tmp/$filename"
 output_file="$out_dir/$filename"
+password_token=".snapshot-password-$$"
+password_host_file="$app_dir/tmp/$password_token"
+password_container_file="/app/tmp/$password_token"
 
 cleanup() {
   rm -f -- "$host_temp"
+  rm -f -- "$password_host_file"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+printf '%s\n' "$backup_password" > "$password_host_file"
+chmod 600 "$password_host_file"
 
 cd "$app_dir"
 docker compose config >/dev/null
-if ! docker compose exec -T shendu node scripts/admin-cli.mjs snapshot "$container_file" "$backup_password"; then
+if ! docker compose exec -T -u root shendu node scripts/admin-cli.mjs snapshot "$container_file" --password-file "$password_container_file"; then
   echo "运行中的应用容器不可用，正在使用临时容器创建整站快照……" >&2
-  docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs snapshot "$container_file" "$backup_password"
+  docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs snapshot "$container_file" --password-file "$password_container_file"
 fi
 
 [ -s "$host_temp" ] || { echo "整站快照没有生成，备份已停止" >&2; exit 1; }
