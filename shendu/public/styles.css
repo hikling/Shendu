@@ -304,8 +304,6 @@ body.reduce-motion *,body.reduce-motion *:before,body.reduce-motion *:after{anim
 .template-panel-body .field input{height:46px}
 .template-reset{margin-top:2px;font-size:.72rem}
 .action-template-panel{margin-top:10px}
-.template-subgroup+.template-subgroup{margin-top:18px;padding-top:17px;border-top:1px dashed var(--line)}
-.template-subgroup h4{margin:0 0 13px;color:var(--secondary);font-size:.76rem;letter-spacing:.08em}
 .stage-save-actions{padding-top:18px;border-top:1px solid var(--line)}
 @media(max-width:620px){
   .template-field-grid{grid-template-columns:1fr}

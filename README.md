@@ -6,7 +6,7 @@
 
 - 每日、每周、每月、90 天、年度、重大决策六类复盘
 - 复盘周期按北京时间锁定：每日仅写今日、每周仅写本周，其余类型仅写当前周期；历史记录只读可查
-- 草稿、完整性检查、完成后永久锁定、单次行动验证、版本冲突保护；六类复盘问题与行动验证文案可在阶段设置中编辑，锁定记录会保留当时模板快照
+- 草稿、完整性检查、完成后永久锁定、单次行动验证、版本冲突保护；六类复盘与行动验证的核心问题标题可在阶段设置中编辑，锁定记录会保留当时模板快照
 - 每类 14 条文案，按账户和日期轮换
 - 历史搜索与类型、年份、月份筛选；筛选栏在电脑与手机上自动重排，避免文字与下拉箭头挤压
 - 所有书写控件统一使用日记正文的字体与字号，阶段指标输入框固定高度并与状态选项对齐
@@ -73,14 +73,48 @@ docker compose logs -f --tail=100
 
 如果 Caddy 报 `dependency shendu failed to start`，先查看 `docker compose logs shendu`。本版已修复全新解压后挂载目录属于 root、导致 SQLite 或恢复临时文件无法写入的问题。
 
-更新代码后：
+## 服务器更新已有部署
+
+以下步骤适用于按上文从 GitHub 克隆到 `/opt/Shendu` 的服务器。日常更新不需要重新运行 `scripts/install.sh`，也不要删除 `.env`、`shendu/data/` 或其中的 `backup-master.key`。
+
+### 1. 更新前备份并检查工作区
+
+建议先用超级管理员在网页“数据备份”中导出一份整站加密备份，再在服务器执行：
+
+```bash
+cd /opt/Shendu
+git status --short
+```
+
+正常情况下不会输出内容。如果显示被修改的受版本控制文件，先保存或处理这些改动，不要直接覆盖；`.env`、`data/` 和 `tmp/` 属于本机数据，不会被普通 `git pull` 更新。
+
+### 2. 拉取代码并重建容器
 
 ```bash
 cd /opt/Shendu
 git pull --ff-only
 cd shendu
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 ```
+
+这会保留现有数据库、主密钥和站点配置，只替换应用镜像并完成必要的数据迁移。
+
+### 3. 检查更新结果
+
+```bash
+docker compose ps
+docker compose logs --tail=100 shendu
+curl -fsS https://你的域名/healthz
+```
+
+健康检查应返回包含 `"ok":true` 的 JSON。若服务没有正常启动，继续查看：
+
+```bash
+docker compose logs --tail=200 shendu
+docker compose logs --tail=200 caddy
+```
+
+如果浏览器仍显示旧界面，先强制刷新页面并清理该站点缓存。安装目录不是 `/opt/Shendu` 时，请在项目目录执行 `git rev-parse --show-toplevel` 查出仓库根目录，再按相同步骤更新。
 
 ## Cloudflare 域名设置
 
