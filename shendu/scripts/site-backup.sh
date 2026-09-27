@@ -1,10 +1,57 @@
 #!/bin/sh
 set -eu
-: "${SHENDU_SNAPSHOT_PASSWORD:?请先设置 SHENDU_SNAPSHOT_PASSWORD（至少 15 个字符）}"
-stamp="$(date +%Y%m%d-%H%M%S)"
-out_dir="${1:-./backups}"
-mkdir -p "$out_dir"
-docker compose exec -T shendu node scripts/admin-cli.mjs snapshot "/app/tmp/shendu-site-$stamp.shendu-db" "$SHENDU_SNAPSHOT_PASSWORD"
-docker compose cp "shendu:/app/tmp/shendu-site-$stamp.shendu-db" "$out_dir/shendu-site-$stamp.shendu-db"
-chmod 600 "$out_dir/shendu-site-$stamp.shendu-db"
-echo "$out_dir/shendu-site-$stamp.shendu-db"
+
+umask 077
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+app_dir="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+out_dir="${1:-$app_dir/backups}"
+reason="${2:-manual}"
+password_file="${SHENDU_SNAPSHOT_PASSWORD_FILE:-$app_dir/data/server-backup.password}"
+
+case "$reason" in
+  manual|pre-update) ;;
+  *) echo "备份类型只能是 manual 或 pre-update" >&2; exit 1 ;;
+esac
+
+mkdir -p "$app_dir/data" "$app_dir/tmp" "$out_dir" "$(dirname -- "$password_file")"
+out_dir="$(CDPATH= cd -- "$out_dir" && pwd)"
+
+if [ -n "${SHENDU_SNAPSHOT_PASSWORD:-}" ]; then
+  backup_password="$SHENDU_SNAPSHOT_PASSWORD"
+else
+  if [ ! -f "$password_file" ]; then
+    command -v openssl >/dev/null 2>&1 || { echo "缺少 openssl，无法生成整站备份密码" >&2; exit 1; }
+    openssl rand -hex 32 > "$password_file"
+    chmod 600 "$password_file"
+    echo "已生成服务器整站备份密码文件：$password_file" >&2
+    echo "请把该密码文件另存到服务器之外；恢复整站快照时必须使用。" >&2
+  fi
+  chmod 600 "$password_file"
+  backup_password="$(tr -d '\r\n' < "$password_file")"
+fi
+
+[ "${#backup_password}" -ge 15 ] || { echo "整站备份密码不能少于 15 个字符" >&2; exit 1; }
+
+stamp="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)"
+filename="shendu-full-site-$reason-$stamp.shendu-db"
+container_file="/app/tmp/$filename"
+host_temp="$app_dir/tmp/$filename"
+output_file="$out_dir/$filename"
+
+cleanup() {
+  rm -f -- "$host_temp"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+cd "$app_dir"
+docker compose config >/dev/null
+if ! docker compose exec -T shendu node scripts/admin-cli.mjs snapshot "$container_file" "$backup_password"; then
+  echo "运行中的应用容器不可用，正在使用临时容器创建整站快照……" >&2
+  docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs snapshot "$container_file" "$backup_password"
+fi
+
+[ -s "$host_temp" ] || { echo "整站快照没有生成，备份已停止" >&2; exit 1; }
+install -m 600 "$host_temp" "$output_file"
+echo "整站加密备份已完成：$output_file" >&2
+echo "$output_file"

@@ -17,6 +17,7 @@
 - 复盘标题、正文、日记、验证结果和个人设置落盘前使用 AES-256-GCM 加密；旧版明文数据库首次启动时自动迁移并清理旧页
 - 个人 `.shendu` v4 整包加密导出、浏览器校验、安全合并与完整恢复；用户名只写入加密载荷，跨账户恢复必须再次确认原用户名与原备份密码，并兼容 v3 及更早加密备份
 - 超级管理员可在网页导出、校验并恢复 `.shendu-site` 整站加密迁移包，一次迁移全部账户、密码摘要、复盘、设置和外部备份配置
+- 每次服务器更新时询问是否生成 `.shendu-db` 整站加密快照；只有确认后才备份，备份失败时停止更新
 - WebDAV 与 S3 兼容存储（R2、AWS S3、MinIO 等），连接读写校验和定时备份
 - SQLite WAL、健康检查、安全响应头、同源写入检查、登录限速
 - Debian + Docker Compose + Caddy 自动 HTTPS
@@ -76,7 +77,7 @@ docker compose logs -f --tail=100
 
 ## 服务器更新已有部署
 
-更新前，建议先用超级管理员在网页“数据备份”中导出一份 `.shendu-site` 整站加密备份。更新过程中绝对不要删除或替换 `.env`、`data/` 和 `data/backup-master.key`。
+新版更新脚本会在拉取代码之前询问是否备份全站数据。只有明确输入 `y` 才会生成整站加密快照；输入 `n` 或直接回车会跳过。选择备份后若生成失败，脚本不会继续更新。网页导出的 `.shendu-site` 仍适合另存到电脑或其他服务器。更新过程中绝对不要删除或替换 `.env`、`data/` 和 `data/backup-master.key`。
 
 ### 1. 先确认是不是 Git 部署
 
@@ -110,6 +111,7 @@ sh /tmp/shendu-update.sh /opt/Shendu
 - 不依赖 Git 是否设置了上游分支，直接获取 `origin/main`
 - 自动处理 Git 的 `safe.directory` 检查
 - 检查当前分支、受版本控制文件和 `.env`，发现风险立即停止，不强行覆盖
+- 拉取代码前询问是否创建整站 AES-256-GCM 加密快照，只有输入 `y` 才执行
 - 先构建新镜像，构建失败时不动正在运行的网站
 - 先单独启动 `shendu` 并等待健康检查，再启动 Caddy，避免 `dependency shendu failed to start`
 - 保留 `.env`、数据库、内部主密钥、Caddy 证书和全部用户资料
@@ -118,6 +120,27 @@ sh /tmp/shendu-update.sh /opt/Shendu
 
 ```bash
 sh /opt/Shendu/shendu/scripts/update.sh
+```
+
+运行后会显示：
+
+```text
+是否先备份全站数据？输入 y 确认备份，输入 n 或直接回车跳过 [y/N]：
+```
+
+输入 `y` 后才会生成：
+
+- 整站快照：`/opt/Shendu/shendu/backups/shendu-full-site-pre-update-日期时间.shendu-db`
+- 恢复密码文件：`/opt/Shendu/shendu/data/server-backup.password`
+
+两者权限均为 `600`。快照包含全部账户、密码摘要、复盘、设置、外部备份配置、运行记录和内部数据密钥。请至少把密码文件另存到服务器之外；只保存快照、不保存密码将无法恢复。输入 `n` 或直接回车时不会创建快照，也不会生成新的备份密码文件。
+
+无人值守更新可以通过环境变量明确选择：
+
+```bash
+SHENDU_BACKUP_BEFORE_UPDATE=yes sh /opt/Shendu/shendu/scripts/update.sh
+# 或明确跳过：
+SHENDU_BACKUP_BEFORE_UPDATE=no sh /opt/Shendu/shendu/scripts/update.sh
 ```
 
 无论当前位于哪个目录都可以执行。如果仓库不在 `/opt/Shendu`，也可以明确传入仓库根目录：
@@ -172,6 +195,16 @@ docker compose logs --tail=200 shendu
 docker compose logs --tail=200 caddy
 ```
 
+#### 显示“无法创建更新前整站备份”
+
+为防止升级时丢失资料，更新脚本不会绕过备份继续运行。先查看应用状态与日志：
+
+```bash
+cd /opt/Shendu/shendu
+docker compose ps
+docker compose logs --tail=200 shendu
+```
+
 ## ZIP 旧部署迁移为 Git 部署
 
 ZIP 解压版不能原地执行 `git pull`。最安全的方法是使用网页整站备份迁移，并保留旧目录作为回退：
@@ -221,6 +254,8 @@ docker compose ps
 
 - SQLite：`./data/shendu.db`（敏感内容为 AES-256-GCM 密文，文件权限 `600`）
 - 数据加密主密钥：`./data/backup-master.key`（文件权限 `600`，丢失后服务器数据无法解密）
+- 服务器快照恢复密码：`./data/server-backup.password`（首次确认备份后生成，文件权限 `600`）
+- 更新前整站快照：`./backups/shendu-full-site-pre-update-*.shendu-db`（仅在更新时确认备份后生成）
 - Caddy 证书：Docker 卷 `caddy_data`
 - 临时导入文件：`./tmp`，完成、取消或空闲一小时后清理
 
@@ -233,34 +268,39 @@ docker compose ps
 
 `.shendu-site` 不明文暴露用户名、条目数量或正文。它包含全部账户的密码摘要而不是登录密码明文，恢复后原账户密码仍然有效。
 
-### 命令行快照（兜底方式）
+### 服务器整站快照
 
-创建整站加密快照：
+每次运行服务器更新脚本时，系统都会先询问是否创建整站加密快照；只有输入 `y` 才会备份。也可以随时手动创建：
 
 ```bash
-export SHENDU_SNAPSHOT_PASSWORD='至少十五个字符的独立密码'
-./scripts/site-backup.sh ./backups
+cd /opt/Shendu/shendu
+sh scripts/site-backup.sh
 ```
 
-也可直接在容器内创建迁移包：
+第一次运行会自动生成 `./data/server-backup.password`。后续备份沿用同一个密码，因此无需每次输入。备份内容使用 PBKDF2-HMAC-SHA-256（600,000 次）与 AES-256-GCM 整包加密；服务器磁盘上不会出现明文备份。
+
+查看生成的快照：
 
 ```bash
-docker compose exec shendu node scripts/admin-cli.mjs migration \
-  /app/tmp/server.shendu-migration '至少十五个字符的独立密码'
-docker compose cp shendu:/app/tmp/server.shendu-migration ./server.shendu-migration
+ls -lh /opt/Shendu/shendu/backups/
 ```
 
-恢复整站快照前先停止服务：
+恢复 `.shendu-db` 整站快照前先停止应用：
 
 ```bash
+cd /opt/Shendu/shendu
+backup_file="/opt/Shendu/shendu/backups/要恢复的文件.shendu-db"
+backup_password="$(tr -d '\r\n' < ./data/server-backup.password)"
+install -m 600 "$backup_file" ./tmp/restore.shendu-db
 docker compose stop shendu
-docker compose cp ./server.shendu-migration shendu:/app/tmp/server.shendu-migration
-docker compose run --rm shendu node scripts/admin-cli.mjs restore \
-  /app/tmp/server.shendu-migration '创建备份时的密码'
+docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs restore \
+  /app/tmp/restore.shendu-db "$backup_password"
 docker compose up -d
+rm -f ./tmp/restore.shendu-db
+unset backup_password
 ```
 
-恢复命令会保留 `shendu.db.before-restore`，注销旧会话，并把快照中的内部备份密钥恢复到 `./data/backup-master.key`。
+恢复命令会保留 `shendu.db.before-restore`，注销旧会话，并把快照中的内部数据密钥恢复到 `./data/backup-master.key`。`.shendu-db` 使用命令行恢复；网页上传恢复使用网页导出的 `.shendu-site`。
 
 ## 外部备份
 

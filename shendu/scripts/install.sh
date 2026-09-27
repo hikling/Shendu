@@ -35,3 +35,5 @@ else
   chmod 600 .env
   echo ".env 已存在，未覆盖。"
 fi
+
+mkdir -p data tmp backups
