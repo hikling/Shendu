@@ -296,12 +296,26 @@ backup_file="/opt/Shendu/shendu/backups/要恢复的文件.shendu-db"
 install -m 600 "$backup_file" ./tmp/restore.shendu-db
 docker compose stop shendu
 docker compose run --rm --no-deps shendu node scripts/admin-cli.mjs restore \
-  /app/tmp/restore.shendu-db --password-file /app/data/server-backup.password
-docker compose up -d
-rm -f ./tmp/restore.shendu-db
+  /app/tmp/restore.shendu-db --password-file /app/data/server-backup.password \
+  && docker compose up -d \
+  && rm -f ./tmp/restore.shendu-db
 ```
 
 恢复命令会保留 `shendu.db.before-restore`，注销旧会话，并把快照中的内部数据密钥恢复到 `./data/backup-master.key`。`.shendu-db` 使用命令行恢复；网页上传恢复使用网页导出的 `.shendu-site`。
+
+创建和恢复服务器快照时都会检查 SQLite 完整性、外键关系及内部密钥能否解密全部敏感字段。错误密码、截短认证标签或密钥不匹配会停止操作。请保持应用停止直到恢复成功；上面的命令只有恢复成功后才启动应用和清理临时文件。
+
+网页整站备份同时受加密文件 128 MiB 和解压资料 176 MiB 的上限约束；超限会明确拒绝导出，请改用服务器快照。服务器快照解压内容上限为 1 GiB，生成时也会检查相同上限。
+
+个人备份的“安全合并”保留当前已完成或已验证的记录，仅更新较旧的草稿。确实要用备份替换全部复盘时，使用“完整恢复”。数据密钥丢失时，应找回原 `backup-master.key`，或在新部署的站点用备份密码恢复；不能直接用新密钥解密旧数据库。
+
+安全回归测试（在装有 Node.js 24 的开发环境执行，使用隔离临时数据库，不接触部署数据）：
+
+```bash
+cd /opt/Shendu/shendu
+npm run check
+npm test
+```
 
 ## 外部备份
 

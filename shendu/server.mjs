@@ -7,6 +7,7 @@ import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash, creat
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { lookup } from 'node:dns/promises';
 import net from 'node:net';
+import { atomicWriteFile, validBase64 } from './scripts/backup-safety.mjs';
 
 process.umask(0o077);
 const PORT = Number(process.env.SHENDU_PORT || 3000);
@@ -110,7 +111,7 @@ const encryptDataWithKey = (value, key, scope) => {
 const decryptDataWithKey = (value, key, scope) => {
   const parts = String(value || '').split('.');
   if (parts.length !== 4 || `${parts[0]}.` !== DATA_ENVELOPE_PREFIX) throw new Error('加密数据格式不正确');
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(parts[1], 'base64url'));
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(parts[1], 'base64url'), { authTagLength: 16 });
   decipher.setAAD(Buffer.from(`shendu:data:v1:${scope}`));
   decipher.setAuthTag(Buffer.from(parts[2], 'base64url'));
   return JSON.parse(Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()]).toString('utf8'));
@@ -118,7 +119,7 @@ const decryptDataWithKey = (value, key, scope) => {
 const parseMasterKey = value => /^[a-f0-9]{64}$/i.test(String(value || '').trim()) ? Buffer.from(String(value).trim(), 'hex') : null;
 const decryptSecretWithKey = (value, key) => {
   const x = JSON.parse(value);
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(x.iv, 'base64'));
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(x.iv, 'base64'), { authTagLength: 16 });
   decipher.setAuthTag(Buffer.from(x.tag, 'base64'));
   return JSON.parse(Buffer.concat([decipher.update(Buffer.from(x.data, 'base64')), decipher.final()]).toString('utf8'));
 };
@@ -147,7 +148,7 @@ const encryptedContentRows = () => {
 };
 const persistMasterKey = key => {
   mkdirSync(dirname(MASTER_KEY_PATH), { recursive: true });
-  writeFileSync(MASTER_KEY_PATH, `${key.toString('hex')}\n`, { mode: 0o600 });
+  atomicWriteFile(MASTER_KEY_PATH, `${key.toString('hex')}\n`);
   try { chmodSync(MASTER_KEY_PATH, 0o600); } catch {}
 };
 const initialiseMasterKey = () => {
@@ -168,7 +169,7 @@ const initialiseMasterKey = () => {
       try { decryptDataWithKey(item.value, key, item.scope); return true; } catch { return false; }
     })) || null;
     if (!masterKey) {
-      masterKeyError = '服务器数据加密密钥与现有数据库不匹配。请恢复正确的 backup-master.key；个人 .shendu 文件仍可使用原备份密码恢复。';
+      masterKeyError = '服务器数据加密密钥与现有数据库不匹配。请恢复正确的 backup-master.key；个人 .shendu 文件可在密钥正常的新站点使用原备份密码恢复。';
       console.error(masterKeyError);
       return;
     }
@@ -279,7 +280,7 @@ const verifyPassword = (password, stored) => {
 };
 const requireMasterKey = () => {
   if (masterKey) return masterKey;
-  throw Object.assign(new Error(masterKeyError || '服务器数据加密密钥暂不可用；上传个人加密备份恢复不受影响。'), { status: 503, code: 'data_key_unavailable' });
+  throw Object.assign(new Error(masterKeyError || '服务器数据加密密钥暂不可用；请恢复正确的密钥，或在新站点使用原备份密码恢复。'), { status: 503, code: 'data_key_unavailable' });
 };
 const encryptData = (value, scope) => encryptDataWithKey(value, requireMasterKey(), scope);
 const decryptData = (value, scope) => {
@@ -534,7 +535,7 @@ function legacySettingsEntries(settings) {
 }
 function openLegacyCredential(stored, key, scope) {
   const parts=String(stored||'').split('.'); if(parts.length!==4||parts[0]!=='v1')throw new Error('旧备份加密条目无效');
-  try { const iv=Buffer.from(parts[1],'base64url'),tag=Buffer.from(parts[2],'base64url'),ciphertext=Buffer.from(parts[3],'base64url'); const decipher=createDecipheriv('aes-256-gcm',key,iv);decipher.setAAD(Buffer.from(`shendu:backup-credential:v1:${scope}`));decipher.setAuthTag(tag);return JSON.parse(Buffer.concat([decipher.update(ciphertext),decipher.final()]).toString('utf8')); } catch { throw new Error('备份密码错误，或文件已经损坏'); }
+  try { const iv=Buffer.from(parts[1],'base64url'),tag=Buffer.from(parts[2],'base64url'),ciphertext=Buffer.from(parts[3],'base64url'); const decipher=createDecipheriv('aes-256-gcm',key,iv,{authTagLength:16});decipher.setAAD(Buffer.from(`shendu:backup-credential:v1:${scope}`));decipher.setAuthTag(tag);return JSON.parse(Buffer.concat([decipher.update(ciphertext),decipher.final()]).toString('utf8')); } catch { throw new Error('备份密码错误，或文件已经损坏'); }
 }
 function parseLegacyStream(lines,password) {
   let header; try{header=JSON.parse(lines[0])}catch{throw new Error('旧备份文件头无效')}
@@ -549,7 +550,7 @@ function parseLegacyEnvelope(buffer,password) {
   if(envelope?.format!=='shendu-encrypted-backup'||envelope.version!==1||envelope.kind!=='account')throw new Error('不支持的备份格式');
   if(envelope.kdf?.iterations!==600000||typeof envelope.kdf?.salt!=='string'||envelope.kdf.salt.length>128||typeof envelope.cipher?.iv!=='string'||envelope.cipher.iv.length>128)throw new Error('旧备份密钥参数不正确');
   const header={format:envelope.format,version:envelope.version,kind:envelope.kind,createdAt:envelope.createdAt,kdf:envelope.kdf,cipher:envelope.cipher,payloadBytes:envelope.payloadBytes,...(typeof envelope.label==='string'?{label:envelope.label}:{})};
-  try { const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64url'),envelope.kdf.iterations,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64url'));decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64url'));const payload=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext,'base64url')),decipher.final()]).toString('utf8'));if(payload.format!=='shendu-user-backup'||payload.version!==1||!Array.isArray(payload.reviews))throw new Error('旧备份内容格式无效');const entries=[{kind:'profile',value:payload.source||{}},...legacySettingsEntries(payload.settings),...payload.reviews.map(value=>({kind:'record',value:legacyReviewToRecord(value)}))];return{header:{format:'shendu-encrypted-backup',exportedAt:payload.exportedAt||envelope.createdAt||'',count:entries.length},entries}; } catch(e){if(e.message==='旧备份内容格式无效')throw e;throw new Error('备份密码错误，或文件已经损坏')}
+  try { const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64url'),envelope.kdf.iterations,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64url'),{authTagLength:16});decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64url'));const payload=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext,'base64url')),decipher.final()]).toString('utf8'));if(payload.format!=='shendu-user-backup'||payload.version!==1||!Array.isArray(payload.reviews))throw new Error('旧备份内容格式无效');const entries=[{kind:'profile',value:payload.source||{}},...legacySettingsEntries(payload.settings),...payload.reviews.map(value=>({kind:'record',value:legacyReviewToRecord(value)}))];return{header:{format:'shendu-encrypted-backup',exportedAt:payload.exportedAt||envelope.createdAt||'',count:entries.length},entries}; } catch(e){if(e.message==='旧备份内容格式无效')throw e;throw new Error('备份密码错误，或文件已经损坏')}
 }
 function parseCurrentEnvelope(envelope,password) {
   const isV3=envelope?.format==='shendu-v3'&&envelope.version===3;
@@ -558,7 +559,7 @@ function parseCurrentEnvelope(envelope,password) {
   if(!validBackupCipherFields(envelope))throw new Error('备份加密参数不正确');
   const header=isV4?{format:'shendu-v4',version:4,kind:'account',kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'}:{format:'shendu-v3',version:3,kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'};
   try {
-    const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'));
+    const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'),{authTagLength:16});
     decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64'));
     const compressed=Buffer.concat([decipher.update(Buffer.from(envelope.data,'base64')),decipher.final()]);
     const payload=JSON.parse(gunzipSync(compressed,{maxOutputLength:MAX_BACKUP_REQUEST_BYTES}).toString('utf8'));
@@ -576,7 +577,7 @@ function parseBackupBuffer(buffer, password) {
   const raw=buffer.toString('utf8').trim(), lines=raw.split('\n');
   if(!raw)throw new Error('备份文件为空');
   let first;try{first=JSON.parse(lines[0])}catch{throw new Error('备份文件头无效')}
-  if(first.format==='shendu-v4'||first.format==='shendu-v3')return parseCurrentEnvelope(first,password);
+  if(first.format==='shendu-v4'||first.format==='shendu-v3')return parseCurrentEnvelope(JSON.parse(raw),password);
   if(first.format==='shendu-stream-v2')return parseLegacyStream(lines,password);
   if(first.format==='shendu-encrypted-backup')return parseLegacyEnvelope(buffer,password);
   if (lines.length < 3) throw new Error('备份文件不完整');
@@ -591,7 +592,7 @@ function parseBackupBuffer(buffer, password) {
   const entries = [];
   for (let i = 1; i < lines.length - 1; i += 1) {
     const x = JSON.parse(lines[i]); if (x.seq !== i - 1) throw new Error('备份条目顺序异常');
-    const decipher = createDecipheriv('aes-256-gcm', keyMaterial.subarray(0,32), Buffer.from(x.iv,'base64'));
+    const decipher = createDecipheriv('aes-256-gcm', keyMaterial.subarray(0,32), Buffer.from(x.iv,'base64'),{authTagLength:16});
     decipher.setAAD(Buffer.from(`shendu-v2|${x.seq}|${header.count}`)); decipher.setAuthTag(Buffer.from(x.tag,'base64'));
     entries.push(JSON.parse(Buffer.concat([decipher.update(Buffer.from(x.data,'base64')), decipher.final()]).toString('utf8')));
   }
@@ -601,8 +602,7 @@ function parseBackupBuffer(buffer, password) {
 const MAX_BACKUP_FILE_BYTES = 36 * 1024 * 1024;
 const MAX_BACKUP_REQUEST_BYTES = 48 * 1024 * 1024;
 function validBackupCipherFields(envelope) {
-  const valid=(value,length)=>typeof value==='string'&&value.length<=64&&/^[A-Za-z0-9+/]+={0,2}$/.test(value)&&Buffer.from(value,'base64').length===length;
-  return valid(envelope.kdf?.salt,16)&&valid(envelope.cipher?.iv,12)&&valid(envelope.tag,16)&&typeof envelope.data==='string';
+  return validBase64(envelope.kdf?.salt,16)&&validBase64(envelope.cipher?.iv,12)&&validBase64(envelope.tag,16)&&validBase64(envelope.data);
 }
 function backupPasswordFrom(value) {
   const password = typeof value === 'string' ? value : '';
@@ -700,8 +700,8 @@ function applyBackup(userId, parsed, mode) {
       if(natural)recordId=natural.id;
       const collision = db.prepare(`SELECT user_id FROM records WHERE id=?`).get(recordId);
       if (collision && collision.user_id !== userId) recordId = randomUUID();
-      const existing = db.prepare(`SELECT updated_at FROM records WHERE id=? AND user_id=?`).get(recordId, userId);
-      if (existing && Date.parse(existing.updated_at) >= Date.parse(rec.updated_at || 0)) continue;
+      const existing = db.prepare(`SELECT updated_at,status FROM records WHERE id=? AND user_id=?`).get(recordId, userId);
+      if (existing && (existing.status!=='draft' || Date.parse(existing.updated_at) >= Date.parse(rec.updated_at || 0))) continue;
       const title=encryptData(safeText(rec.title,200),dataScope('record',userId,recordId,'title'));
       const data=encryptData(rec.data||{},dataScope('record',userId,recordId,'data'));
       const verification=rec.verification?encryptData(rec.verification,dataScope('record',userId,recordId,'verification')):null;
@@ -754,7 +754,10 @@ function siteBackupPayload() {
 function createSiteBackupBuffer(password) {
   const salt=randomBytes(16),iv=randomBytes(12),key=pbkdf2Sync(password,salt,600000,32,'sha256');
   const header={format:'shendu-site-v1',version:1,kind:'site',kdf:{name:'PBKDF2-HMAC-SHA-256',iterations:600000,salt:salt.toString('base64')},cipher:{name:'AES-256-GCM',iv:iv.toString('base64')},compression:'gzip'};
-  const clear=gzipSync(Buffer.from(JSON.stringify(siteBackupPayload())),{level:9});
+  const payload=siteBackupPayload();validateSiteBackupPayload(payload);
+  const serialized=Buffer.from(JSON.stringify(payload));
+  if(serialized.length>MAX_SITE_BACKUP_REQUEST_BYTES)throw Object.assign(new Error('整站资料解压后超过网页恢复上限，请使用服务器整站快照备份'),{status:413});
+  const clear=gzipSync(serialized,{level:9});
   const cipher=createCipheriv('aes-256-gcm',key,iv);cipher.setAAD(Buffer.from(JSON.stringify(header)));
   const encrypted=Buffer.concat([cipher.update(clear),cipher.final()]);
   return Buffer.from(JSON.stringify({...header,tag:cipher.getAuthTag().toString('base64'),data:encrypted.toString('base64')}));
@@ -773,7 +776,7 @@ function parseSiteBackupBuffer(buffer,password) {
   if(!validBackupCipherFields(envelope))throw new Error('整站备份加密参数不正确');
   const header={format:'shendu-site-v1',version:1,kind:'site',kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'};
   try{
-    const key=pbkdf2Sync(backupPasswordFrom(password),Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'));
+    const key=pbkdf2Sync(backupPasswordFrom(password),Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'),{authTagLength:16});
     decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64'));
     const compressed=Buffer.concat([decipher.update(Buffer.from(envelope.data,'base64')),decipher.final()]);
     const payload=JSON.parse(gunzipSync(compressed,{maxOutputLength:MAX_SITE_BACKUP_REQUEST_BYTES}).toString('utf8'));
@@ -816,15 +819,15 @@ function validateSiteBackupPayload(payload) {
     if(!userIds.has(record.user_id)||!validEntityId(record.id)||recordIds.has(record.id)||!validRecordType(record.type)||!validRecordPeriod(record.type,record.period)||!['draft','completed','verified'].includes(record.status)||typeof record.title!=='string'||!isPlainObject(record.data)||Buffer.byteLength(JSON.stringify(record.data))>MAX_RECORD_DATA_BYTES||(record.verification!==null&&record.verification!==undefined&&!isPlainObject(record.verification))||(record.status==='verified'&&!isPlainObject(record.verification)))throw new Error('整站备份中的复盘数据无效');
     recordIds.add(record.id);const count=(recordCounts.get(record.user_id)||0)+1;if(count>MAX_RECORDS_PER_USER)throw new Error(`整站备份中的单个账户不能超过 ${MAX_RECORDS_PER_USER} 条复盘记录`);recordCounts.set(record.user_id,count);
   }
-  const targetIds=new Set();
+  const targetIds=new Set(),targetOwners=new Map();
   for(const target of payload.targets){
     if(!userIds.has(target.user_id)||!validEntityId(target.id)||targetIds.has(target.id)||!['webdav','s3'].includes(target.kind)||!['manual','daily','weekly'].includes(target.schedule)||!isPlainObject(target.config))throw new Error('整站备份中的外部备份配置无效');
     try{normalizeBackupConfig(target.kind,target.config)}catch{throw new Error('整站备份中的外部备份配置无效')}
-    targetIds.add(target.id);
+    targetIds.add(target.id);targetOwners.set(target.id,target.user_id);
   }
   const runIds=new Set();
   for(const run of payload.runs){
-    if(!userIds.has(run.user_id)||!targetIds.has(run.target_id)||!validEntityId(run.id)||runIds.has(run.id))throw new Error('整站备份中的运行记录无效');
+    if(!userIds.has(run.user_id)||targetOwners.get(run.target_id)!==run.user_id||!validEntityId(run.id)||runIds.has(run.id))throw new Error('整站备份中的运行记录无效');
     runIds.add(run.id);
   }
 }
