@@ -340,3 +340,62 @@ test('密码文件保留首尾空格，不静默改变用户的备份密码', ()
     assert.equal(JSON.parse(clear).masterKey, readFileSync(join(dataDir, 'backup-master.key'), 'utf8').trim());
   } finally { writeFileSync(passwordFile, original); }
 });
+test('整站备份可恢复完成后超过草稿上限的正文及旧版周期，个人备份仍可导入', async () => {
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date());
+  const data = { answers: Object.fromEntries(['decision','options','facts','expectation','failure','choice','firstStep'].map(key => [key, ['内容']])), action: '行动', ifThen: '应对', verifyDate: today, journal: '' };
+  data.journal = 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify(data)) - 64);
+  const saved = await api('/api/records', { method: 'PUT', body: { type: 'decision', period: today, title: '接近上限的记录', data } });
+  assert.equal(saved.status, 200, saved.text.slice(0, 500));
+  const decisionId = saved.value.record.id;
+  const completed = await api(`/api/records/${decisionId}/complete`, { method: 'POST' });
+  assert.equal(completed.status, 200, completed.text.slice(0, 500));
+  assert.ok(Buffer.byteLength(JSON.stringify(completed.value.record.data)) > 1024 * 1024);
+
+  const legacyId = 'legacy-record-1';
+  const original = (await api(`/api/records/${recordId}`)).value.record;
+  const masterKey = Buffer.from(readFileSync(join(dataDir, 'backup-master.key'), 'utf8').trim(), 'hex');
+  const seal = (value, field) => {
+    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', masterKey, iv);
+    cipher.setAAD(Buffer.from(`shendu:data:v1:record:${sourceId}:${legacyId}:${field}`));
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
+    return `sd1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${encrypted.toString('base64url')}`;
+  };
+  const db = new DatabaseSync(join(dataDir, 'shendu.db'));
+  try { db.prepare('UPDATE records SET id=?,period=?,title=?,data=?,verification=? WHERE id=?').run(legacyId, '2025-Q1', seal(original.title, 'title'), seal(original.data, 'data'), seal(original.verification, 'verification'), recordId); }
+  finally { db.close(); }
+
+  const site = await api('/api/admin/site-backup/export', { method: 'POST', body: { currentPassword: password, backupPassword } });
+  assert.equal(site.status, 200, site.text.slice(0, 500));
+  const payload = envelopePayload(site.text);
+  assert.equal(payload.records.find(row => row.id === legacyId).period, '2025-Q1');
+  assert.equal(payload.records.find(row => row.id === decisionId).data.journal, data.journal);
+  const inspectedSite = await api('/api/admin/site-backup/inspect', { method: 'POST', body: { encryptedBackup: site.text, backupPassword } });
+  assert.equal(inspectedSite.status, 200, inspectedSite.text);
+
+  const personal = await api('/api/backup/export', { method: 'POST', body: {} });
+  assert.equal(personal.status, 200, personal.text.slice(0, 500));
+  const inspectedPersonal = await api('/api/data/inspect', { method: 'POST', body: { encryptedBackup: personal.text, password: backupPassword } });
+  assert.equal(inspectedPersonal.status, 200, inspectedPersonal.text.slice(0, 500));
+  const created = await api('/api/admin/users', { method: 'POST', body: { username: 'large_record_restore', password } });
+  assert.equal(created.status, 201, created.text);
+  const memberLogin = await api('/api/auth/login', { method: 'POST', auth: '', body: { username: 'large_record_restore', password } });
+  assert.equal(memberLogin.status, 200, memberLogin.text);
+  const imported = await api('/api/data/import', { method: 'POST', auth: memberLogin.cookie, body: { encryptedBackup: personal.text, password: backupPassword, sourceUsername: 'audit_owner', mode: 'merge' } });
+  assert.equal(imported.status, 200, imported.text.slice(0, 500));
+  const memberRecords = (await api('/api/records', { auth: memberLogin.cookie })).value.records;
+  assert.equal(memberRecords.find(row => row.type === 'decision').data.journal, data.journal);
+
+  const invalidPayload = structuredClone(payload);
+  invalidPayload.records.find(row => row.id === decisionId).data = null;
+  const invalid = await api('/api/admin/site-backup/inspect', { method: 'POST', body: { encryptedBackup: reseal(site.text, invalidPayload), backupPassword } });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.value.error, 'site_backup_invalid_record');
+  assert.match(invalid.value.message, /复盘数据无效（正文）/);
+
+  const restored = await api('/api/admin/site-backup/restore', { method: 'POST', body: { encryptedBackup: site.text, currentPassword: password, backupPassword, confirmation: 'RESTORE_SITE' } });
+  assert.equal(restored.status, 200, restored.text);
+  const login = await api('/api/auth/login', { method: 'POST', auth: '', body: { username: 'audit_owner', password } });
+  assert.equal(login.status, 200, login.text); cookie = login.cookie;
+  assert.equal((await api(`/api/records/${legacyId}`)).value.record.period, '2025-Q1');
+  assert.equal((await api(`/api/records/${decisionId}`)).value.record.data.journal, data.journal);
+});
