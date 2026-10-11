@@ -506,8 +506,8 @@ function legacyPeriod(type, period) {
   if (type === 'yearly' && /^\d{4}/.test(period || '')) return period.slice(0,4);
   return period;
 }
-function legacyReviewToRecord(review) {
-  if (!review || !validRecordType(review.type) || typeof review.period !== 'string') throw new Error('旧备份包含无法识别的复盘记录');
+function legacyReviewToRecord(review, unsupportedFields = null) {
+  if (!review || !validRecordType(review.type) || typeof review.period !== 'string') throw Object.assign(new Error('旧备份包含无法识别的复盘记录'),{code:'backup_invalid_record'});
   const source=review.data&&typeof review.data==='object'&&!Array.isArray(review.data)?review.data:{};
   const aliases={
     daily:{fact:'today',cause:'cause'}, weekly:{expected:'plan',fact:'progress',pattern:'patterns',stop:'keepStop',priorities:'nextThree'},
@@ -516,6 +516,13 @@ function legacyReviewToRecord(review) {
     yearly:{fact:'coordinates',expected:'expectations',balance:'areas',decisions:'decisions',ownership:'keepRelease',priorities:'nextYear'},
     decision:{expected:'decision',options:'options',fact:'facts',prediction:'expectation',risk:'failure',choice:'choice'}
   }[review.type]||{};
+  if (unsupportedFields) {
+    const known = new Set(['action','ifThen','journal','sleep','energy','risk','firstStep','outcome','lesson','resultQuality','processQuality']);
+    for (const key of Object.keys(aliases)) { known.add(key); known.add(`entries:${key}`); }
+    for (let i=0;i<3;i+=1) for (const name of ['metricName','metricTarget','metric','metricStatus']) known.add(`${name}${i}`);
+    for (const key of Object.keys(source)) if (!known.has(key)) unsupportedFields.add(`review.data.${key}`);
+    for (const key of Object.keys(review)) if (!['id','type','period','title','data','verified','status','revision','createdAt','updatedAt','verificationDate'].includes(key)) unsupportedFields.add(`review.${key}`);
+  }
   const answers={};
   for (const [oldKey,newKey] of Object.entries(aliases)) {
     const values=[]; if(typeof source[oldKey]==='string')values.push(source[oldKey]);
@@ -525,11 +532,13 @@ function legacyReviewToRecord(review) {
   if(review.type==='decision'&&source.firstStep&&!answers.firstStep)answers.firstStep=[String(source.firstStep)];
   const statusMap={done:'已达标',partial:'部分达标',missed:'未达标',rest:'计划休息'};
   const metrics=[0,1,2].map(i=>({name:String(source[`metricName${i}`]||`指标 ${i+1}`),target:String(source[`metricTarget${i}`]||''),action:String(source[`metric${i}`]||''),status:statusMap[source[`metricStatus${i}`]]||String(source[`metricStatus${i}`]||'')}));
-  const verified=review.verified===true, stamp=validTime(review.updatedAt)?new Date(review.updatedAt).toISOString():now();
-  return {id:safeText(review.id,100)||randomUUID(),type:review.type,period:legacyPeriod(review.type,review.period),title:safeText(review.title,200),status:verified?'verified':review.status==='completed'?'completed':'draft',version:Math.max(1,Number(review.revision)||1),created_at:stamp,updated_at:stamp,completed_at:review.status==='completed'?stamp:null,verified_at:verified?stamp:null,verification:verified?{result:safeText(source.outcome,6000),adjustment:safeText(source.lesson,6000),outcome:source.resultQuality==='good'?'好':source.resultQuality==='poor'?'差':null,process:source.processQuality==='good'?'好':source.processQuality==='poor'?'差':null}:null,data:{answers,action:String(source.action||''),ifThen:String(source.ifThen||''),verifyDate:String(review.verificationDate||''),journal:String(source.journal||''),sleep:String(source.sleep||''),energy:String(source.energy||''),risk:String(source.risk||''),metrics}};
+  const verified=review.verified===true, stamp=validTime(review.updatedAt)?new Date(review.updatedAt).toISOString():'1970-01-01T00:00:00.000Z';
+  const createdAt=validTime(review.createdAt)?new Date(review.createdAt).toISOString():stamp;
+  return {id:safeText(review.id,100)||stableImportId(JSON.stringify(review)),type:review.type,period:legacyPeriod(review.type,review.period),title:safeText(review.title,200),status:verified?'verified':review.status==='completed'?'completed':'draft',version:Math.max(1,Number(review.revision)||1),created_at:createdAt,updated_at:stamp,completed_at:review.status==='completed'||verified?stamp:null,verified_at:verified?stamp:null,verification:verified?{result:safeText(source.outcome,6000),adjustment:safeText(source.lesson,6000),outcome:source.resultQuality==='good'?'好':source.resultQuality==='poor'?'差':null,process:source.processQuality==='good'?'好':source.processQuality==='poor'?'差':null}:null,data:{answers,action:String(source.action||''),ifThen:String(source.ifThen||''),verifyDate:String(review.verificationDate||''),journal:String(source.journal||''),sleep:String(source.sleep||''),energy:String(source.energy||''),risk:String(source.risk||''),metrics}};
 }
-function legacySettingsEntries(settings) {
+function legacySettingsEntries(settings, unsupportedFields = null) {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return [];
+  if (unsupportedFields) for (const key of Object.keys(settings)) if (!['stage','focus','start','days','sleep','energy','metrics','showQuarterly'].includes(key)) unsupportedFields.add(`settings.${key}`);
   const sleep=Number.parseFloat(settings.sleep), energy=Number.parseFloat(settings.energy);
   return [{kind:'stage',value:{name:safeText(settings.stage||'稳住底盘',50),focus:safeText(settings.focus||'建立稳定的身体、行动与财务节奏',300),startDate:/^\d{4}-\d{2}-\d{2}$/.test(settings.start||'')?settings.start:todayDate(),days:Math.min(366,Math.max(7,Number(settings.days)||90)),sleepTarget:Number.isFinite(sleep)?sleep:7,energyTarget:Number.isFinite(energy)?energy:70,metrics:Array.isArray(settings.metrics)&&settings.metrics.length===3?settings.metrics.map(x=>({name:safeText(x.name,40),target:safeText(x.target,200)})):defaultStage().metrics,showQuarter:settings.showQuarterly===true}}];
 }
@@ -541,16 +550,25 @@ function parseLegacyStream(lines,password) {
   let header; try{header=JSON.parse(lines[0])}catch{throw new Error('旧备份文件头无效')}
   if(header.format!=='shendu-stream-v2'||header.kind!=='account'||header.iterations!==600000||!/^[a-f0-9]{32}$/i.test(header.salt||''))throw new Error('不支持的备份格式');
   const key=pbkdf2Sync(password,Buffer.from(header.salt,'hex'),600000,32,'sha256'),scope=createHash('sha256').update(lines[0]).digest('hex');
-  let metadata=null,ended=false,total=0;const records=[];
-  for(let i=1;i<lines.length;i+=1){if(!lines[i])continue;if(ended)throw new Error('备份结束后出现额外数据');const value=openLegacyCredential(lines[i],key,`${scope}:${i-1}`);if(i===1&&value.kind==='metadata')metadata=value;else if(value.kind==='review'){records.push(legacyReviewToRecord(value.review));total+=1}else if(value.kind==='end'&&value.total===total)ended=true;else throw new Error('备份条目或数量校验失败')}
-  if(!metadata||!ended)throw new Error('备份被截断或缺少结束校验');const entries=[{kind:'profile',value:metadata.source||{}},...legacySettingsEntries(metadata.settings),...records.map(value=>({kind:'record',value}))];return{header:{format:'shendu-stream-v2',exportedAt:metadata.exportedAt||'',count:entries.length},entries};
+  let metadata=null,ended=false,total=0;const records=[],unsupportedFields=new Set();
+  for(let i=1;i<lines.length;i+=1){if(!lines[i])continue;if(ended)throw new Error('备份结束后出现额外数据');const value=openLegacyCredential(lines[i],key,`${scope}:${i-1}`);if(i===1&&value.kind==='metadata')metadata=value;else if(value.kind==='review'){records.push(legacyReviewToRecord(value.review,unsupportedFields));total+=1}else if(value.kind==='end'&&value.total===total)ended=true;else throw new Error('备份条目或数量校验失败')}
+  if(!metadata||!ended)throw new Error('备份被截断或缺少结束校验');const entries=[{kind:'profile',value:metadata.source||{}},...legacySettingsEntries(metadata.settings,unsupportedFields),...records.map(value=>({kind:'record',value}))];return{header:{format:'shendu-stream-v2',exportedAt:metadata.exportedAt||'',count:entries.length},entries,unsupportedFields:[...unsupportedFields].slice(0,50)};
 }
 function parseLegacyEnvelope(buffer,password) {
   let envelope;try{envelope=JSON.parse(buffer.toString('utf8'))}catch{throw new Error('这不是有效的慎独加密备份文件')}
   if(envelope?.format!=='shendu-encrypted-backup'||envelope.version!==1||envelope.kind!=='account')throw new Error('不支持的备份格式');
   if(envelope.kdf?.iterations!==600000||typeof envelope.kdf?.salt!=='string'||envelope.kdf.salt.length>128||typeof envelope.cipher?.iv!=='string'||envelope.cipher.iv.length>128)throw new Error('旧备份密钥参数不正确');
   const header={format:envelope.format,version:envelope.version,kind:envelope.kind,createdAt:envelope.createdAt,kdf:envelope.kdf,cipher:envelope.cipher,payloadBytes:envelope.payloadBytes,...(typeof envelope.label==='string'?{label:envelope.label}:{})};
-  try { const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64url'),envelope.kdf.iterations,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64url'),{authTagLength:16});decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64url'));const payload=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext,'base64url')),decipher.final()]).toString('utf8'));if(payload.format!=='shendu-user-backup'||payload.version!==1||!Array.isArray(payload.reviews))throw new Error('旧备份内容格式无效');const entries=[{kind:'profile',value:payload.source||{}},...legacySettingsEntries(payload.settings),...payload.reviews.map(value=>({kind:'record',value:legacyReviewToRecord(value)}))];return{header:{format:'shendu-encrypted-backup',exportedAt:payload.exportedAt||envelope.createdAt||'',count:entries.length},entries}; } catch(e){if(e.message==='旧备份内容格式无效')throw e;throw new Error('备份密码错误，或文件已经损坏')}
+  let payload;
+  try {
+    const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64url'),envelope.kdf.iterations,32,'sha256');
+    const decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64url'),{authTagLength:16});
+    decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64url'));
+    payload=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext,'base64url')),decipher.final()]).toString('utf8'));
+  } catch { throw new Error('备份密码错误，或文件已经损坏'); }
+  if(payload?.format!=='shendu-user-backup'||payload.version!==1||!Array.isArray(payload.reviews))throw Object.assign(new Error('旧备份内容格式无效'),{code:'backup_invalid_file'});
+  const unsupportedFields=new Set(),entries=[{kind:'profile',value:payload.source||{}},...legacySettingsEntries(payload.settings,unsupportedFields),...payload.reviews.map(value=>({kind:'record',value:legacyReviewToRecord(value,unsupportedFields)}))];
+  return{header:{format:'shendu-encrypted-backup',exportedAt:payload.exportedAt||envelope.createdAt||'',count:entries.length},entries,unsupportedFields:[...unsupportedFields].slice(0,50)};
 }
 function parseCurrentEnvelope(envelope,password) {
   const isV3=envelope?.format==='shendu-v3'&&envelope.version===3;
@@ -558,18 +576,18 @@ function parseCurrentEnvelope(envelope,password) {
   if((!isV3&&!isV4)||envelope.kdf?.name!=='PBKDF2-HMAC-SHA-256'||envelope.kdf?.iterations!==600000||envelope.cipher?.name!=='AES-256-GCM'||envelope.compression!=='gzip')throw new Error('不支持的备份格式');
   if(!validBackupCipherFields(envelope))throw new Error('备份加密参数不正确');
   const header=isV4?{format:'shendu-v4',version:4,kind:'account',kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'}:{format:'shendu-v3',version:3,kdf:envelope.kdf,cipher:envelope.cipher,compression:'gzip'};
+  let compressed;
   try {
     const key=pbkdf2Sync(password,Buffer.from(envelope.kdf.salt,'base64'),600000,32,'sha256'),decipher=createDecipheriv('aes-256-gcm',key,Buffer.from(envelope.cipher.iv,'base64'),{authTagLength:16});
     decipher.setAAD(Buffer.from(JSON.stringify(header)));decipher.setAuthTag(Buffer.from(envelope.tag,'base64'));
-    const compressed=Buffer.concat([decipher.update(Buffer.from(envelope.data,'base64')),decipher.final()]);
-    const payload=JSON.parse(gunzipSync(compressed,{maxOutputLength:MAX_BACKUP_REQUEST_BYTES}).toString('utf8'));
-    if(payload?.format!=='shendu-account-data'||payload.version!==(isV4?4:3)||!Array.isArray(payload.entries))throw new Error('备份内容格式无效');
-    if(isV4&&!checkUsername(payload.owner?.username))throw new Error('备份缺少有效的账户归属信息');
-    return{header:{format:header.format,exportedAt:payload.exportedAt||'',count:payload.entries.length},owner:payload.owner||null,entries:payload.entries};
-  } catch(error) {
-    if(['备份内容格式无效','备份缺少有效的账户归属信息'].includes(error.message))throw error;
-    throw new Error('备份密码错误，或文件已经损坏');
-  }
+    compressed=Buffer.concat([decipher.update(Buffer.from(envelope.data,'base64')),decipher.final()]);
+  } catch { throw new Error('备份密码错误，或文件已经损坏'); }
+  let payload;
+  try { payload=JSON.parse(gunzipSync(compressed,{maxOutputLength:MAX_BACKUP_REQUEST_BYTES}).toString('utf8')); }
+  catch(error) { if(error.code==='ERR_BUFFER_TOO_LARGE')throw Object.assign(new Error('备份解压后超过导入上限'),{code:'backup_limit_exceeded'});throw Object.assign(new Error('备份内容格式无效'),{code:'backup_invalid_file'}); }
+  if(payload?.format!=='shendu-account-data'||payload.version!==(isV4?4:3)||!Array.isArray(payload.entries))throw Object.assign(new Error('备份内容格式无效'),{code:'backup_invalid_file'});
+  if(isV4&&!checkUsername(payload.owner?.username))throw Object.assign(new Error('备份缺少有效的账户归属信息'),{code:'backup_owner_missing'});
+  return{header:{format:header.format,exportedAt:payload.exportedAt||'',count:payload.entries.length},owner:payload.owner||null,entries:payload.entries};
 }
 function parseBackupBuffer(buffer, password) {
   if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer || '');
@@ -606,14 +624,23 @@ function validBackupCipherFields(envelope) {
 }
 function backupPasswordFrom(value) {
   const password = typeof value === 'string' ? value : '';
-  if (!password || password.length > 256) throw new Error('请输入生成这份备份时使用的密码');
+  if (!password || password.length > 256) throw Object.assign(new Error('请输入生成这份备份时使用的密码'),{code:'backup_password_required'});
   return password;
 }
 function backupTextFrom(value) {
-  if (typeof value !== 'string' || !value.trim()) throw new Error('请选择完整的 .shendu 加密备份文件');
+  if (typeof value !== 'string' || !value.trim()) throw Object.assign(new Error('请选择完整的 .shendu 加密备份文件'),{code:'backup_file_required'});
   const buffer = Buffer.from(value, 'utf8');
-  if (buffer.length > MAX_BACKUP_FILE_BYTES) throw new Error('备份文件超过 36 MB，无法导入');
+  if (buffer.length > MAX_BACKUP_FILE_BYTES) throw Object.assign(new Error('备份文件超过 36 MB，无法导入'),{code:'backup_limit_exceeded'});
   return buffer;
+}
+function backupErrorCode(cause, fallback) {
+  if (typeof cause?.code==='string'&&cause.code.startsWith('backup_')) return cause.code;
+  const message=String(cause?.message||'');
+  if (/密码错误|已被篡改|文件已经损坏/.test(message)) return 'backup_auth_failed';
+  if (/不支持的备份格式/.test(message)) return 'backup_unsupported_format';
+  if (/超过.*(?:MB|上限)|最多恢复/.test(message)) return 'backup_limit_exceeded';
+  if (/截断|缺少|无效|异常|不完整|不是有效|为空/.test(message)) return 'backup_invalid_file';
+  return fallback;
 }
 function backupOwner(parsed) {
   const profile=parsed.owner||parsed.entries.find(entry=>entry?.kind==='profile')?.value||null;
@@ -623,6 +650,20 @@ function backupOwner(parsed) {
 function backupOwnerMatches(username,ownerUsername) {
   return Boolean(username&&ownerUsername&&username.localeCompare(ownerUsername,undefined,{sensitivity:'accent'})===0);
 }
+function stableImportId(seed) {
+  const bytes=createHash('sha256').update(`shendu:personal-import:v1:${seed}`).digest().subarray(0,16);
+  bytes[6]=(bytes[6]&0x0f)|0x80; bytes[8]=(bytes[8]&0x3f)|0x80;
+  const hex=bytes.toString('hex');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+function importedRecordId(userId,sourceId) {
+  const collision=db.prepare(`SELECT user_id FROM records WHERE id=?`).get(sourceId);
+  if(!collision||collision.user_id===userId)return sourceId;
+  const id=stableImportId(`${userId}:${sourceId}`);
+  const mapped=db.prepare(`SELECT user_id FROM records WHERE id=?`).get(id);
+  if(mapped&&mapped.user_id!==userId)throw Object.assign(new Error('导入记录编号冲突'),{code:'backup_id_conflict'});
+  return id;
+}
 function assertBackupOwner(user,parsed,sourceUsername='') {
   const owner=backupOwner(parsed);
   if(!checkUsername(owner.username))throw Object.assign(new Error('这份备份没有可验证的所属用户名，无法恢复。请先在原账户恢复后重新导出新版备份。'),{status:400,code:'backup_owner_missing'});
@@ -631,12 +672,31 @@ function assertBackupOwner(user,parsed,sourceUsername='') {
   return {owner,crossAccount:true};
 }
 function backupPreview(parsed,currentUser=null) {
+  const prepared=prepareBackup(parsed);
   const counts = parsed.entries.reduce((result, entry) => {
     result[entry.kind] = (result[entry.kind] || 0) + 1;
     return result;
   }, {});
-  const owner=backupOwner(parsed);
+  const owner=backupOwner(parsed),unsupportedFields=new Set(parsed.unsupportedFields||[]);
+  for (const entry of parsed.entries) {
+    if (!['profile','stage','theme','record'].includes(entry.kind)) unsupportedFields.add(`entry.${entry.kind}`);
+    if (entry.kind==='stage'||entry.kind==='theme') reportDroppedPaths(entry.value,entry.kind==='stage'?normalizeStage(entry.value):normalizeTheme(entry.value),entry.kind,unsupportedFields);
+  }
+  const conflicts={existing:0,protected:0,newerOrEqualDraft:0,willUpdate:0,willCreate:0,idRemapped:0};
+  if (currentUser) for (const rec of prepared.records) {
+    const natural=rec.type==='decision'?null:db.prepare(`SELECT id,updated_at,status FROM records WHERE user_id=? AND type=? AND period=?`).get(currentUser.id,rec.type,rec.period);
+    const id=natural?.id||importedRecordId(currentUser.id,rec.id);
+    if(id!==rec.id)conflicts.idRemapped++;
+    const existing=natural||db.prepare(`SELECT updated_at,status FROM records WHERE id=? AND user_id=?`).get(id,currentUser.id);
+    if (!existing) { conflicts.willCreate++; continue; }
+    conflicts.existing++;
+    if (existing.status!=='draft') conflicts.protected++;
+    else if (Date.parse(existing.updated_at)>=Date.parse(rec.updated_at)) conflicts.newerOrEqualDraft++;
+    else conflicts.willUpdate++;
+  }
+  const existingRecords=currentUser?db.prepare(`SELECT COUNT(*) AS n FROM records WHERE user_id=?`).get(currentUser.id).n:0;
   return {
+    format:parsed.header.format,
     exportedAt: parsed.header.exportedAt || parsed.header.createdAt || '',
     count: parsed.entries.length,
     total: counts.record || 0,
@@ -645,8 +705,47 @@ function backupPreview(parsed,currentUser=null) {
     ownerUsername: owner.username,
     ownerDisplayName: owner.displayName,
     ownerMatches:currentUser?backupOwnerMatches(currentUser.username,owner.username):null,
-    requiresOwnerConfirmation:currentUser?!backupOwnerMatches(currentUser.username,owner.username):false
+    requiresOwnerConfirmation:currentUser?!backupOwnerMatches(currentUser.username,owner.username):false,
+    unsupportedFields:[...unsupportedFields].slice(0,50),
+    merge:{create:conflicts.willCreate,update:conflicts.willUpdate,skip:conflicts.protected+conflicts.newerOrEqualDraft},
+    replace:{deleteExisting:existingRecords,import:prepared.records.length},
+    conflicts,
+    profile:{displayName:owner.displayName,usernameRetained:true},
+    settingsActions:{stage:counts.stage?(currentUser&&db.prepare(`SELECT 1 FROM user_settings WHERE user_id=? AND key='stage'`).get(currentUser.id)?'merge-keeps-current':'import'):'absent',theme:counts.theme?(currentUser&&db.prepare(`SELECT 1 FROM user_settings WHERE user_id=? AND key='theme'`).get(currentUser.id)?'merge-keeps-current':'import'):'absent'}
   };
+}
+
+function reportDroppedPaths(source,normalized,prefix,fields,depth=0) {
+  if(!isPlainObject(source)||depth>5||fields.size>=50)return;
+  for(const [key,value] of Object.entries(source)) {
+    const path=`${prefix}.${key}`;
+    if(!isPlainObject(normalized)||!Object.hasOwn(normalized,key))fields.add(path);
+    else if(isPlainObject(value))reportDroppedPaths(value,normalized[key],path,fields,depth+1);
+    else if(typeof value==='string'&&typeof normalized[key]==='string'&&value.length>normalized[key].length&&value!==normalized[key])fields.add(path);
+    if(fields.size>=50)break;
+  }
+}
+
+function prepareBackup(parsed) {
+  if(!Array.isArray(parsed.entries)||parsed.entries.length>MAX_RECORDS_PER_USER+10)throw Object.assign(new Error('备份条目数量不正确'),{code:'backup_invalid_entries'});
+  const singleton=new Set(),records=[],ids=new Set(),periods=new Set();
+  for(const entry of parsed.entries) {
+    if(!isPlainObject(entry)||typeof entry.kind!=='string')throw Object.assign(new Error('备份包含无效条目'),{code:'backup_invalid_entries'});
+    if(['profile','stage','theme'].includes(entry.kind)) {
+      if(singleton.has(entry.kind)||!isPlainObject(entry.value))throw Object.assign(new Error('备份的账户或设置条目无效'),{code:'backup_invalid_entries'});
+      singleton.add(entry.kind);
+    }
+    if(entry.kind!=='record')continue;
+    const record=normalizeImportedRecord(entry.value);
+    if(!record)throw Object.assign(new Error('备份中包含无效的复盘记录'),{code:'backup_invalid_record'});
+    const periodKey=record.type==='decision'?null:`${record.type}:${record.period}`;
+    if(ids.has(record.id)||(periodKey&&periods.has(periodKey)))throw Object.assign(new Error('备份中存在重复的复盘记录'),{code:'backup_duplicate_record'});
+    ids.add(record.id);if(periodKey)periods.add(periodKey);records.push(record);
+  }
+  if(records.length>MAX_RECORDS_PER_USER)throw Object.assign(new Error(`单个账户最多恢复 ${MAX_RECORDS_PER_USER} 条复盘记录`),{code:'backup_record_limit'});
+  const profile=parsed.entries.find(entry=>entry.kind==='profile')?.value||parsed.owner||null;
+  if(parsed.owner&&profile&&parsed.owner.username!==profile.username)throw Object.assign(new Error('备份账户归属信息不一致'),{code:'backup_owner_mismatch'});
+  return {records,profile};
 }
 
 function getBackupPassword(userId) {
@@ -667,15 +766,14 @@ function getBackupStatus(userId) {
 }
 
 function normalizeImportedRecord(value) {
-  if(!isPlainObject(value)||!validRecordType(value.type)||!validRecordPeriod(value.type,value.period)||!isPlainObject(value.data))return null;
+  if(!isPlainObject(value)||!validRecordType(value.type)||!validRecordPeriod(value.type,value.period)||!isPlainObject(value.data)||typeof value.title!=='string'||!['draft','completed','verified'].includes(value.status)||(value.verification!=null&&!isPlainObject(value.verification))||(value.status==='verified'&&!isPlainObject(value.verification)))return null;
   if(Buffer.byteLength(JSON.stringify(value.data))>MAX_RECORD_DATA_BYTES)return null;
-  const updatedAt=validTime(value.updated_at)?new Date(value.updated_at).toISOString():now();
+  const updatedAt=validTime(value.updated_at)?new Date(value.updated_at).toISOString():validTime(value.created_at)?new Date(value.created_at).toISOString():'1970-01-01T00:00:00.000Z';
   const createdAt=validTime(value.created_at)?new Date(value.created_at).toISOString():updatedAt;
   const verification=isPlainObject(value.verification)?value.verification:null;
-  let status=['draft','completed','verified'].includes(value.status)?value.status:'draft';
-  if(status==='verified'&&!verification)status='completed';
+  const status=value.status;
   return {
-    id:validEntityId(value.id)?value.id:randomUUID(),type:value.type,period:String(value.period),title:safeText(value.title,200),data:value.data,
+    id:validEntityId(value.id)?value.id:stableImportId(JSON.stringify(value)),type:value.type,period:String(value.period),title:safeText(value.title,200),data:value.data,
     status,version:Math.max(1,Math.min(1000000,Number(value.version)||1)),verification,created_at:createdAt,updated_at:updatedAt,
     completed_at:validTime(value.completed_at)?new Date(value.completed_at).toISOString():null,
     verified_at:status==='verified'&&validTime(value.verified_at)?new Date(value.verified_at).toISOString():null
@@ -683,23 +781,20 @@ function normalizeImportedRecord(value) {
 }
 
 function applyBackup(userId, parsed, mode) {
-  if(!Array.isArray(parsed.entries)||parsed.entries.length>MAX_RECORDS_PER_USER+10)throw new Error('备份条目数量不正确');
-  const recordEntries=parsed.entries.filter(x=>x?.kind==='record'),records=recordEntries.map(x=>normalizeImportedRecord(x.value));
-  if(recordEntries.length>MAX_RECORDS_PER_USER)throw new Error(`单个账户最多恢复 ${MAX_RECORDS_PER_USER} 条复盘记录`);
-  if(records.some(record=>!record))throw new Error('备份中包含无效的复盘记录');
+  const {records,profile}=prepareBackup(parsed);
   db.exec('BEGIN IMMEDIATE');
   try {
     if (mode === 'replace') {
       db.prepare(`DELETE FROM records WHERE user_id=?`).run(userId);
       db.prepare(`DELETE FROM user_settings WHERE user_id=? AND key IN ('stage','theme')`).run(userId);
+      if(typeof profile?.displayName==='string'&&profile.displayName.trim())db.prepare(`UPDATE users SET display_name=? WHERE id=?`).run(safeText(profile.displayName,32),userId);
     }
     for (const rec of records) {
       if (!validRecordType(rec.type)) continue;
       let recordId = rec.id;
       const natural = rec.type==='decision'?null:db.prepare(`SELECT id,updated_at FROM records WHERE user_id=? AND type=? AND period=?`).get(userId,rec.type,rec.period);
       if(natural)recordId=natural.id;
-      const collision = db.prepare(`SELECT user_id FROM records WHERE id=?`).get(recordId);
-      if (collision && collision.user_id !== userId) recordId = randomUUID();
+      else recordId=importedRecordId(userId,recordId);
       const existing = db.prepare(`SELECT updated_at,status FROM records WHERE id=? AND user_id=?`).get(recordId, userId);
       if (existing && (existing.status!=='draft' || Date.parse(existing.updated_at) >= Date.parse(rec.updated_at || 0))) continue;
       const title=encryptData(safeText(rec.title,200),dataScope('record',userId,recordId,'title'));
@@ -1163,19 +1258,20 @@ async function api(req, res, url) {
       const preview=backupPreview(parsed,user);
       if(!checkUsername(preview.ownerUsername))return error(res,400,'这份备份没有可验证的所属用户名，无法恢复。请先在原账户恢复后重新导出新版备份。','backup_owner_missing');
       return json(res,200,preview);
-    } catch(e) { return error(res,e.status||400,e.message||'无法校验这份备份',e.code||'backup_inspect_failed'); }
+    } catch(e) { return error(res,e.status||400,e.message||'无法校验这份备份',backupErrorCode(e,'backup_inspect_failed')); }
   }
   if (path === '/api/data/import' && method === 'POST') {
     if (limited(req,`backup-import:${user.id}`,10,3600000)) return error(res,429,'备份恢复次数过多，请稍后再试');
     const body=await readJson(req,MAX_BACKUP_REQUEST_BYTES);
-    if (!['merge','replace'].includes(body.mode)) return error(res,400,'请选择安全合并或完整恢复');
-    if (body.mode==='replace'&&body.confirmation!=='RESTORE') return error(res,400,'完整恢复需要再次确认');
+    if (!['merge','replace'].includes(body.mode)) return error(res,400,'请选择安全合并或完整恢复','backup_mode_required');
+    if (body.mode==='replace'&&body.confirmation!=='RESTORE') return error(res,400,'完整恢复需要再次确认','backup_replace_confirmation_required');
     try {
       const parsed=parseBackupBuffer(backupTextFrom(body.encryptedBackup),backupPasswordFrom(body.password));
       assertBackupOwner(user,parsed,body.sourceUsername);
+      const preview=backupPreview(parsed,user);
       const restored=applyBackup(user.id,parsed,body.mode);
-      return json(res,200,{ok:true,mode:body.mode,...backupPreview(parsed,user),restored});
-    } catch(e) { return error(res,e.status||400,e.message||'无法恢复这份备份',e.code||'backup_import_failed'); }
+      return json(res,200,{ok:true,mode:body.mode,...preview,restored});
+    } catch(e) { return error(res,e.status||400,e.message||'无法恢复这份备份',backupErrorCode(e,'backup_import_failed')); }
   }
   if (path === '/api/admin/site-backup/export' && method === 'POST') {
     if(user.role!=='superadmin')return error(res,403,'只有超级管理员可以导出整站备份','forbidden');
@@ -1225,16 +1321,16 @@ async function api(req, res, url) {
   if (/^\/api\/backup\/upload\/[^/]+\/preview$/.test(path) && method === 'POST') {
     const id=path.split('/')[4];if(!validEntityId(id))return error(res,400,'上传任务编号不正确');
     if(limited(req,`backup-preview:${user.id}`,20,3600000))return error(res,429,'备份校验次数过多，请稍后再试');
-    const file=join(TMP_DIR,`${user.id}-${id}.upload`), password=String(req.headers['x-backup-password']||getBackupPassword(user.id)||''); if(!existsSync(file))return error(res,404,'上传任务已失效'); if(!password)return error(res,400,'请输入这份备份的密码');
-    try { const parsed=parseBackupBuffer(readFileSync(file),password),preview=backupPreview(parsed,user); if(!checkUsername(preview.ownerUsername))return error(res,400,'这份备份没有可验证的所属用户名，无法恢复。请先在原账户恢复后重新导出新版备份。','backup_owner_missing'); return json(res,200,preview); } catch(e){return error(res,e.status||400,e.message,e.code||'backup_inspect_failed')}
+    const file=join(TMP_DIR,`${user.id}-${id}.upload`), password=String(req.headers['x-backup-password']||getBackupPassword(user.id)||''); if(!existsSync(file))return error(res,404,'上传任务已失效','backup_upload_expired'); if(!password)return error(res,400,'请输入这份备份的密码','backup_password_required');
+    try { const parsed=parseBackupBuffer(readFileSync(file),password),preview=backupPreview(parsed,user); if(!checkUsername(preview.ownerUsername))return error(res,400,'这份备份没有可验证的所属用户名，无法恢复。请先在原账户恢复后重新导出新版备份。','backup_owner_missing'); return json(res,200,preview); } catch(e){return error(res,e.status||400,e.message,backupErrorCode(e,'backup_inspect_failed'))}
   }
   if (/^\/api\/backup\/upload\/[^/]+\/apply$/.test(path) && method === 'POST') {
     const id=path.split('/')[4];if(!validEntityId(id))return error(res,400,'上传任务编号不正确');
     if(limited(req,`backup-apply:${user.id}`,10,3600000))return error(res,429,'备份恢复次数过多，请稍后再试');
-    const file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效'); const body=await readJson(req); const password=String(body.password||getBackupPassword(user.id)||''); if(!password)return error(res,400,'请输入这份备份的密码');
-    if(!['merge','replace'].includes(body.mode))return error(res,400,'请选择安全合并或完整恢复');
-    if(body.mode==='replace'&&body.confirmation!=='RESTORE')return error(res,400,'完整恢复需要再次确认');
-    try { const parsed=parseBackupBuffer(readFileSync(file),password); assertBackupOwner(user,parsed,body.sourceUsername); const count=applyBackup(user.id,parsed,body.mode==='replace'?'replace':'merge'); unlinkSync(file); return json(res,200,{ok:true,count}); } catch(e){return error(res,e.status||400,e.message,e.code||'backup_import_failed')}
+    const file=join(TMP_DIR,`${user.id}-${id}.upload`); if(!existsSync(file))return error(res,404,'上传任务已失效','backup_upload_expired'); const body=await readJson(req); const password=String(body.password||getBackupPassword(user.id)||''); if(!password)return error(res,400,'请输入这份备份的密码','backup_password_required');
+    if(!['merge','replace'].includes(body.mode))return error(res,400,'请选择安全合并或完整恢复','backup_mode_required');
+    if(body.mode==='replace'&&body.confirmation!=='RESTORE')return error(res,400,'完整恢复需要再次确认','backup_replace_confirmation_required');
+    try { const parsed=parseBackupBuffer(readFileSync(file),password); assertBackupOwner(user,parsed,body.sourceUsername); const preview=backupPreview(parsed,user),count=applyBackup(user.id,parsed,body.mode); unlinkSync(file); return json(res,200,{ok:true,count,mode:body.mode,...preview}); } catch(e){return error(res,e.status||400,e.message,backupErrorCode(e,'backup_import_failed'))}
   }
   if (path === '/api/backup/targets' && method === 'GET') {
     const targets=db.prepare(`SELECT id,name,kind,schedule,enabled,last_run_at,last_success_at,last_error,created_at FROM backup_targets WHERE user_id=? ORDER BY created_at DESC`).all(user.id); const runs=db.prepare(`SELECT * FROM backup_runs WHERE user_id=? ORDER BY created_at DESC LIMIT 12`).all(user.id); return json(res,200,{targets,runs});

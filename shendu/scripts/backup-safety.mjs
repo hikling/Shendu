@@ -16,8 +16,12 @@ export function atomicWriteFile(file, contents) {
     fd = openSync(temporary, 'wx', 0o600);
     writeFileSync(fd, contents); fsyncSync(fd); closeSync(fd); fd = undefined;
     renameSync(temporary, file);
-    const directory = openSync(dirname(file), 'r');
-    try { fsyncSync(directory); } finally { closeSync(directory); }
+    // Windows does not support opening/syncing directories through this fs API.
+    // The file itself was synced before rename; keep the directory sync on POSIX.
+    if (process.platform !== 'win32') {
+      const directory = openSync(dirname(file), 'r');
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    }
   } finally {
     if (fd !== undefined) closeSync(fd);
     try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }
