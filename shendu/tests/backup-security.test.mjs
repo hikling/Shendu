@@ -90,7 +90,7 @@ test('个人与整站备份不暴露正文或用户名；数据库正文和验�
   const db = new DatabaseSync(join(dataDir, 'shendu.db'), { readOnly: true });
   try { const r = db.prepare('SELECT title,data,verification FROM records WHERE id=?').get(recordId); for (const v of Object.values(r)) assert.ok(v.startsWith('sd1.') && !v.includes(secretText)); }
   finally { db.close(); }
-  assert.equal(statSync(join(dataDir, 'backup-master.key')).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(join(dataDir, 'backup-master.key')).mode & 0o777, 0o600);
 });
 test('个人备份可解密，保留标题、日记、验证内容、状态和模板快照', () => {
   const record = envelopePayload(accountBackup).entries.find(e => e.kind === 'record').value;
@@ -131,6 +131,21 @@ test('无效个人恢复不删除旧数据', async () => {
   const before = (await api('/api/records')).text;
   const payload = envelopePayload(accountBackup); payload.entries.find(e => e.kind === 'record').value.type = 'invalid';
   assert.equal((await api('/api/data/import', { method: 'POST', body: { encryptedBackup: reseal(accountBackup, payload), password: backupPassword, mode: 'replace', confirmation: 'RESTORE' } })).status, 400);
+  assert.equal((await api('/api/records')).text, before);
+});
+test('个人替换在写入后触发账户容量限制时整笔回滚', async () => {
+  const before = (await api('/api/records')).text;
+  const payload = envelopePayload(accountBackup);
+  const record = payload.entries.find(entry => entry.kind === 'record').value;
+  payload.entries = payload.entries.filter(entry => entry.kind !== 'record');
+  for (let i = 0; i < 35; i++) payload.entries.push({ kind: 'record', value: {
+    ...record, id: `44444444-4444-4444-8444-${String(i + 1).padStart(12, '0')}`,
+    type: 'decision', period: '2026-09-28', status: 'draft', verification: null,
+    completed_at: null, verified_at: null, data: { journal: 'x'.repeat(960 * 1024) }
+  } });
+  const backup = reseal(accountBackup, payload);
+  const result = await api('/api/data/import', { method: 'POST', body: { encryptedBackup: backup, password: backupPassword, mode: 'replace', confirmation: 'RESTORE' } });
+  assert.equal(result.status, 400, result.text);
   assert.equal((await api('/api/records')).text, before);
 });
 test('整站恢复数据库约束失败时回滚账户、记录和会话', async () => {
@@ -228,6 +243,71 @@ test('旧流式备份保持兼容，并拒绝截断或重排条目', async () =>
   assert.equal((await inspect(lines.join('\n'))).status, 200);
   assert.equal((await inspect(lines.slice(0, -1).join('\n'))).status, 400);
   assert.equal((await inspect([lines[0], lines[2], lines[1], lines[3]].join('\n'))).status, 400);
+});
+test('固定的五种个人备份格式可逐项恢复中文记录、状态、设置和模板', async () => {
+  const names = ['v4', 'v3', 'v2', 'stream-v2', 'encrypted-v1'];
+  for (const [index, name] of names.entries()) {
+    const encryptedBackup = readFileSync(join(appDir, 'tests', 'fixtures', 'personal', `${name}.shendu`), 'utf8');
+    const created = await api('/api/admin/users', { method: 'POST', body: { username: `fixture_member_${index}`, password } });
+    assert.equal(created.status, 201, created.text);
+    const login = await api('/api/auth/login', { method: 'POST', auth: '', body: { username: `fixture_member_${index}`, password } });
+    assert.equal(login.status, 200, login.text);
+    const auth = login.cookie;
+    const body = { encryptedBackup, password: 'fixture-password-2026', sourceUsername: 'fixture_owner' };
+    const inspected = await api('/api/data/inspect', { method: 'POST', auth, body });
+    assert.equal(inspected.status, 200, `${name}: ${inspected.text}`);
+    assert.equal(inspected.value.format, ({ 'encrypted-v1': 'shendu-encrypted-backup' })[name] || `shendu-${name}`);
+    assert.equal(inspected.value.total, 6);
+    assert.equal(inspected.value.requiresOwnerConfirmation, true);
+    assert.equal(inspected.value.replace.import, 6);
+    assert.equal(inspected.value.merge.create, 6);
+    if (name.startsWith('stream') || name.startsWith('encrypted')) {
+      assert.ok(inspected.value.unsupportedFields.includes('settings.legacyColor'), name);
+      assert.ok(inspected.value.unsupportedFields.includes('review.data.oldCustomField'), name);
+    }
+    const restored = await api('/api/data/import', { method: 'POST', auth, body: { ...body, mode: 'replace', confirmation: 'RESTORE' } });
+    assert.equal(restored.status, 200, `${name}: ${restored.text}`);
+    assert.equal(restored.value.restored, 6);
+    const rows = (await api('/api/records', { auth })).value.records;
+    assert.equal(rows.length, 6, name);
+    assert.deepEqual(new Set(rows.map(row => row.type)), new Set(['daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'decision']));
+    const daily = rows.find(row => row.type === 'daily');
+    assert.equal(daily.title, 'daily 中文标题');
+    assert.equal(daily.status, 'verified');
+    assert.equal(daily.data.journal, 'daily 的日记');
+    assert.equal(daily.verification.result, '已完成，中文验证');
+    assert.equal(rows.find(row => row.type === 'weekly').status, 'completed');
+    assert.equal(rows.find(row => row.type === 'yearly').status, 'draft');
+    if (index < 3) assert.equal(daily.data.templateSnapshot.review.pageTitle, '旧模板');
+    const me = (await api('/api/me', { auth })).value;
+    assert.equal(me.user.displayName, '测试用户');
+    assert.equal(me.stage.name, '深度工作');
+    assert.equal(me.stage.sleepTarget, 8);
+    if (index < 3) { assert.equal(me.stage.reviewTemplates.daily.today, '自己的日课'); assert.equal(me.theme.primary, '#123456'); }
+    const repeated = await api('/api/data/import', { method: 'POST', auth, body: { ...body, mode: 'merge' } });
+    assert.equal(repeated.status, 200, `${name}: ${repeated.text}`);
+    assert.equal(repeated.value.merge.skip, 6);
+    assert.equal((await api('/api/records', { auth })).value.records.length, 6);
+  }
+});
+test('固定旧备份的错误密码、截断与篡改返回稳定错误码且不写入数据', async () => {
+  const text = readFileSync(join(appDir, 'tests', 'fixtures', 'personal', 'v4.shendu'), 'utf8');
+  const before = (await api('/api/records')).text;
+  const wrong = await api('/api/data/inspect', { method: 'POST', body: { encryptedBackup: text, password: 'wrong' } });
+  assert.equal(wrong.status, 400); assert.equal(wrong.value.error, 'backup_auth_failed');
+  const cut = await api('/api/data/inspect', { method: 'POST', body: { encryptedBackup: text.slice(0, -40), password: 'fixture-password-2026' } });
+  assert.equal(cut.status, 400); assert.equal(typeof cut.value.error, 'string');
+  const tampered = JSON.parse(text); tampered.tag = Buffer.alloc(16, 1).toString('base64');
+  const changed = await api('/api/data/import', { method: 'POST', body: { encryptedBackup: JSON.stringify(tampered), password: 'fixture-password-2026', sourceUsername: 'fixture_owner', mode: 'merge' } });
+  assert.equal(changed.status, 400); assert.equal(changed.value.error, 'backup_auth_failed');
+  assert.equal((await api('/api/records')).text, before);
+});
+test('已认证但解压超限的个人备份返回容量错误', async () => {
+  const payload = envelopePayload(accountBackup);
+  payload.entries.find(entry => entry.kind === 'record').value.data.journal = 'x'.repeat(48 * 1024 * 1024);
+  const result = await api('/api/data/inspect', { method: 'POST', body: { encryptedBackup: reseal(accountBackup, payload), password: backupPassword } });
+  assert.equal(result.status, 400, result.text);
+  assert.equal(result.value.error, 'backup_limit_exceeded');
 });
 test('跨站写入、非当前周期、修改已锁定记录被拒绝', async () => {
   assert.equal((await api('/api/backup/password', { method: 'POST', headers: { Origin: 'https://attacker.invalid' }, body: { password: backupPassword } })).status, 403);
