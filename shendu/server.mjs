@@ -418,6 +418,10 @@ const validIsoDate = value => {
   const date=new Date(`${value}T00:00:00Z`);return Number.isFinite(date.valueOf())&&date.toISOString().slice(0,10)===value;
 };
 const validEntityId = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value||''));
+// Older site databases may contain record IDs that predate UUID validation.
+// Keep their IDs intact so encrypted content and restored links retain identity.
+const validStoredRecordId = value => typeof value==='string'&&value.length>0&&value.length<=100&&!/[\x00-\x1f\x7f/\\]/.test(value);
+const validStoredRecordPeriod = value => typeof value==='string'&&value.length>0&&value.length<=100&&!/[\x00-\x1f\x7f]/.test(value);
 const validRecordPeriod = (type,value) => {
   const period=String(value||'');
   if(type==='weekly')return /^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$/.test(period);
@@ -766,8 +770,10 @@ function getBackupStatus(userId) {
 }
 
 function normalizeImportedRecord(value) {
-  if(!isPlainObject(value)||!validRecordType(value.type)||!validRecordPeriod(value.type,value.period)||!isPlainObject(value.data)||typeof value.title!=='string'||!['draft','completed','verified'].includes(value.status)||(value.verification!=null&&!isPlainObject(value.verification))||(value.status==='verified'&&!isPlainObject(value.verification)))return null;
-  if(Buffer.byteLength(JSON.stringify(value.data))>MAX_RECORD_DATA_BYTES)return null;
+  if(!isPlainObject(value)||!validRecordType(value.type)||!validStoredRecordPeriod(value.period)||!isPlainObject(value.data)||typeof value.title!=='string'||!['draft','completed','verified'].includes(value.status)||(value.verification!=null&&!isPlainObject(value.verification)))return null;
+  // A completed record can exceed the draft limit after its template snapshot is attached.
+  // The account-wide storage and backup decompression limits still bound imports.
+  if(Buffer.byteLength(JSON.stringify(value.data))>MAX_ACCOUNT_CONTENT_BYTES)return null;
   const updatedAt=validTime(value.updated_at)?new Date(value.updated_at).toISOString():validTime(value.created_at)?new Date(value.created_at).toISOString():'1970-01-01T00:00:00.000Z';
   const createdAt=validTime(value.created_at)?new Date(value.created_at).toISOString():updatedAt;
   const verification=isPlainObject(value.verification)?value.verification:null;
@@ -910,8 +916,9 @@ function validateSiteBackupPayload(payload) {
     settingKeys.add(identity);
   }
   const recordIds=new Set(),recordCounts=new Map();
-  for(const record of payload.records){
-    if(!userIds.has(record.user_id)||!validEntityId(record.id)||recordIds.has(record.id)||!validRecordType(record.type)||!validRecordPeriod(record.type,record.period)||!['draft','completed','verified'].includes(record.status)||typeof record.title!=='string'||!isPlainObject(record.data)||Buffer.byteLength(JSON.stringify(record.data))>MAX_RECORD_DATA_BYTES||(record.verification!==null&&record.verification!==undefined&&!isPlainObject(record.verification))||(record.status==='verified'&&!isPlainObject(record.verification)))throw new Error('整站备份中的复盘数据无效');
+  for(const [index,record] of payload.records.entries()){
+    const invalid = !isPlainObject(record)?'结构':!userIds.has(record.user_id)?'所属账户':!validStoredRecordId(record.id)?'编号':recordIds.has(record.id)?'重复编号':!validRecordType(record.type)?'类型':!validStoredRecordPeriod(record.period)?'周期':!['draft','completed','verified'].includes(record.status)?'状态':typeof record.title!=='string'?'标题':!isPlainObject(record.data)?'正文':record.verification!==null&&record.verification!==undefined&&!isPlainObject(record.verification)?'验证结果':null;
+    if(invalid)throw Object.assign(new Error(`整站备份中的第 ${index+1} 条复盘数据无效（${invalid}）`),{code:'site_backup_invalid_record'});
     recordIds.add(record.id);const count=(recordCounts.get(record.user_id)||0)+1;if(count>MAX_RECORDS_PER_USER)throw new Error(`整站备份中的单个账户不能超过 ${MAX_RECORDS_PER_USER} 条复盘记录`);recordCounts.set(record.user_id,count);
   }
   const targetIds=new Set(),targetOwners=new Map();
