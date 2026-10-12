@@ -11,8 +11,19 @@ const TYPES = {
   decision:{label:'重大决策',meta:'留依据 · 20–30m',position:'留依据',date:'date'}
 };
 const TYPE_ICONS = {daily:'日',weekly:'周',monthly:'月',quarterly:'季',yearly:'年',decision:'决'};
-const NAV_GLYPHS = {history:'册',actions:'验',backup:'匣',users:'印'};
-function navIcon(route){return TYPE_ICONS[route]?`<span class="nav-type-icon type-${route}" aria-hidden="true"><span>${TYPE_ICONS[route]}</span></span>`:`<span class="nav-glyph" aria-hidden="true"><span>${NAV_GLYPHS[route]||'慎'}</span></span>`}
+const NAV_ICON_PATHS = {
+  daily:'<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/>',
+  weekly:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18M7 14h4M14 14h3M7 18h4"/>',
+  monthly:'<circle cx="12" cy="12" r="9"/><path d="M12 3v9l5 3"/>',
+  quarterly:'<path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/>',
+  yearly:'<path d="M4 20V4h16v16H4ZM8 8h8M8 12h8M8 16h5"/>',
+  decision:'<path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="m9 12 2 2 4-4"/>',
+  history:'<path d="M3 12a9 9 0 1 0 2.4-6.1M3 4v4h4M12 7v5l3 2"/>',
+  actions:'<path d="M4 5h16M4 12h16M4 19h16M7 3v4M7 10v4M7 17v4"/>',
+  backup:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M10 13h4"/>',
+  users:'<circle cx="9" cy="8" r="3"/><path d="M3 19v-1a6 6 0 0 1 12 0v1M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5"/>'
+};
+function navIcon(route){return `<span class="${TYPE_ICONS[route]?'nav-type-icon type-'+route:'nav-glyph'}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${NAV_ICON_PATHS[route]||NAV_ICON_PATHS.daily}</svg></span>`}
 const STATUS = {draft:'草稿',completed:'已完成',verified:'已验证'};
 const PALETTES = {
   '潮汐青':['#176B67','#A86436','#536C9C'],'花间莓':['#A33770','#657637','#71609C'],'蓝色气息':['#466A9B','#A26A42','#7E619A'],
