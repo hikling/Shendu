@@ -11,9 +11,8 @@ const TYPES = {
   decision:{label:'重大决策',meta:'留依据 · 20–30m',position:'留依据',date:'date'}
 };
 const TYPE_ICONS = {daily:'日',weekly:'周',monthly:'月',quarterly:'季',yearly:'年',decision:'决'};
-const NAV_GLYPHS = {history:'册',actions:'验',backup:'匣',users:'印',settings:'设'};
+const NAV_GLYPHS = {history:'册',actions:'验',backup:'匣',users:'印'};
 function navIcon(route){return TYPE_ICONS[route]?`<span class="nav-type-icon type-${route}" aria-hidden="true"><span>${TYPE_ICONS[route]}</span></span>`:`<span class="nav-glyph" aria-hidden="true"><span>${NAV_GLYPHS[route]||'慎'}</span></span>`}
-function brandMark(){return `<svg class="brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true" focusable="false"><path d="M24 15c-4.4-3.1-9.4-3.6-15.5-1.8v21.2c6.1-1.8 11.1-1.3 15.5 1.8V15Zm0 0c4.4-3.1 9.4-3.6 15.5-1.8v21.2c-6.1-1.8-11.1-1.3-15.5 1.8V15Z" stroke="currentColor" stroke-width="2.3" stroke-linejoin="round"/><path d="M24 15v21.2M13 18.5c2.8-.4 5.1 0 7.2 1.1m14.8-1.1c-2.8-.4-5.1 0-7.2 1.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle class="brand-point" cx="24" cy="8" r="2.5"/></svg>`}
 const STATUS = {draft:'草稿',completed:'已完成',verified:'已验证'};
 const PALETTES = {
   '潮汐青':['#176B67','#A86436','#536C9C'],'花间莓':['#A33770','#657637','#71609C'],'蓝色气息':['#466A9B','#A26A42','#7E619A'],
@@ -70,7 +69,7 @@ function templatesForRecord(record){
 }
 function currentTemplateSnapshot(type){return{version:1,review:clone(currentReviewTemplate(type)),action:clone(currentActionTemplate())}}
 
-const state = { user:null, stage:null, theme:null, records:[], stats:{week:0,pending:0,total:0}, route:'daily', settingsSection:'account', current:null, dirty:false, saving:false, navOpen:false, railOpen:false, reauthOpen:false, calendarMonth:null };
+const state = { user:null, stage:null, theme:null, records:[], stats:{week:0,pending:0,total:0}, route:'daily', current:null, dirty:false, saving:false, navOpen:false, railOpen:false, reauthOpen:false, calendarMonth:null };
 let modalReturnFocus=null;
 async function request(path, options = {}) {
   const opts = { credentials:'same-origin', ...options, headers:{ ...(options.body && !(options.body instanceof Blob) && !(options.body instanceof ArrayBuffer) ? {'Content-Type':'application/json'} : {}), ...(options.headers||{}) } };
@@ -109,7 +108,7 @@ function newRecord(type,period){const data={answers:{},action:'',ifCondition:'',
 
 function renderAuth(info={}){
   state.user=null;$('#app').innerHTML=`<main class="auth-shell">
-    <section class="auth-art"><div class="brand-lockup"><div class="brand-row">${brandMark()}<div class="brand-cn">慎獨</div></div></div>
+    <section class="auth-art"><div class="brand-lockup"><div class="brand-row"><div class="seal">慎</div><div class="brand-cn">慎獨</div></div></div>
       <div class="auth-quote">“言寡尤，行寡悔，慎独存诚。”<small>把事实、调整与验证，留成一份不会被情绪改写的记录。</small></div></section>
     <section class="auth-panel"><form class="auth-card" id="auth-form"><h1>${info.firstRun?'建立第一枚印契':'回到自己的复盘室'}</h1><p>${info.firstRun?'第一个注册账户将成为唯一超级管理员。':'你的记录只对当前账户可见。'}</p>
       ${info.mode==='register'||info.firstRun?`<div class="field"><label for="displayName">称呼</label><input id="displayName" name="displayName" maxlength="32" autocomplete="name" placeholder="例如：止水"></div>`:''}
@@ -125,7 +124,7 @@ function renderAuth(info={}){
 
 function navItems(){return Object.entries(TYPES).filter(([k])=>k!=='quarterly'||state.stage.showQuarter).map(([k,v])=>`<button class="nav-item ${state.route===k?'active':''}" data-nav="${k}">${navIcon(k)}<span class="nav-label">${v.label}</span><span class="nav-meta">${v.position}</span></button>`).join('')}
 function sidebar(){return `<aside class="sidebar ${state.navOpen?'open':''}" id="sidebar">
-  <div class="side-brand"><div class="brand-row">${brandMark()}<div class="brand-cn">慎獨</div></div><p class="side-quote">“言寡尤，行寡悔，慎独存诚”</p></div>
+  <div class="side-brand"><div class="brand-row"><div class="seal">慎</div><div class="brand-cn">慎獨</div></div><p class="side-quote">“言寡尤，行寡悔，慎独存诚”</p></div>
   <div class="nav-group"><div class="nav-caption">记录与复盘</div>${navItems()}</div>
   <div class="nav-group"><div class="nav-caption">我的空间</div>
     <button class="nav-item ${state.route==='history'?'active':''}" data-nav="history">${navIcon('history')}<span>历史复盘</span></button>
@@ -133,26 +132,24 @@ function sidebar(){return `<aside class="sidebar ${state.navOpen?'open':''}" id=
     <button class="nav-item ${state.route==='backup'?'active':''}" data-nav="backup">${navIcon('backup')}<span>数据备份</span><span class="nav-meta">.shendu</span></button>
     ${['admin','superadmin'].includes(state.user.role)?`<button class="nav-item ${state.route==='users'?'active':''}" data-nav="users">${navIcon('users')}<span>账户管理</span></button>`:''}
   </div><div class="side-spacer"></div>
-  <div class="side-tools"><button class="nav-item ${state.route==='settings'?'active':''}" data-nav="settings">${navIcon('settings')}<span>设置</span></button></div>
-  <div class="side-user"><div class="user-row"><div class="avatar"><span>${esc((state.user.displayName||state.user.username)[0])}</span></div><div class="user-copy"><strong>${esc(state.user.displayName||state.user.username)}</strong><small>${state.user.role==='superadmin'?'超级管理员':state.user.role==='admin'?'管理员':'成员'}</small></div></div></div>
+  <button class="side-user" type="button" id="settings-trigger" title="设置" aria-label="打开设置"><span class="user-row"><span class="avatar" aria-hidden="true">${esc((state.user.displayName||state.user.username)[0])}</span><span class="user-copy"><strong>${esc(state.user.displayName||state.user.username)}</strong><small>${state.user.role==='superadmin'?'超级管理员':state.user.role==='admin'?'管理员':'成员'}</small></span><span class="icon-btn" aria-hidden="true"><span class="chevron-icon down"></span></span></span></button>
 </aside><div class="drawer-backdrop ${state.navOpen?'open':''}" id="drawer-backdrop"></div>`}
 
-function topbar(){const isType=TYPES[state.route],routeLabels={history:'历史复盘',actions:currentActionTemplate().pageTitle,backup:'数据备份',users:'账户管理',settings:'设置'};return `<header class="topbar"><div class="crumb"><button class="mobile-menu" id="menu-toggle" type="button" data-route-icon="${state.route}" aria-label="打开目录" aria-controls="sidebar" aria-expanded="false">${navIcon(state.route)}</button><strong>${esc(isType?isType.label:(routeLabels[state.route]||'慎独'))}</strong><span>/</span><span>${formatDate(today())} · ${esc(state.stage.name)}阶段</span></div><div style="display:flex;gap:8px"><button class="btn btn-ghost mobile-rail-toggle" id="rail-toggle" aria-controls="right-rail" aria-expanded="false" ${state.route==='settings'?'hidden':''}>阶段与日历</button><div class="privacy-pill"><i></i><span>私人复盘空间</span></div></div></header>`}
-function shell(content){const settings=state.route==='settings';$('#app').innerHTML=`<div class="app-shell">${sidebar()}${topbar()}<div class="workspace ${settings?'workspace-settings':''}"><main class="main">${content}</main>${settings?'':rightRail()}</div></div>`;bindCommon()}
+function topbar(){const isType=TYPES[state.route],routeLabels={history:'历史复盘',actions:currentActionTemplate().pageTitle,backup:'数据备份',users:'账户管理'};return `<header class="topbar"><div class="crumb"><button class="mobile-menu" id="menu-toggle" type="button" data-route-icon="${state.route}" aria-label="打开目录" aria-controls="sidebar" aria-expanded="false">${navIcon(state.route)}</button><strong>${esc(isType?isType.label:(routeLabels[state.route]||'慎独'))}</strong><span>/</span><span>${formatDate(today())} · ${esc(state.stage.name)}阶段</span></div><div style="display:flex;gap:8px"><button class="btn btn-ghost mobile-rail-toggle" id="rail-toggle" aria-controls="right-rail" aria-expanded="false">阶段与日历</button><div class="privacy-pill"><i></i><span>私人复盘空间</span></div></div></header>`}
+function shell(content){$('#app').innerHTML=`<div class="app-shell">${sidebar()}${topbar()}<div class="workspace"><main class="main">${content}</main>${rightRail()}</div></div>`;bindCommon()}
 
 const SPACE_PAGE_META = {
   history:{mark:'册',note:'循迹 · 归档有序'},
   actions:{mark:'验',note:'闭环 · 让行动有回音'},
   backup:{mark:'匣',note:'守存 · 密文归档'},
-  users:{mark:'印',note:'共管 · 权限有界'},
-  settings:{mark:'设',note:'自定 · 简明有序'}
+  users:{mark:'印',note:'共管 · 权限有界'}
 };
 function spacePageHead(route,{title,description,action=''}){const meta=SPACE_PAGE_META[route];return `<header class="space-page-head space-head-${route}"><span class="space-head-watermark" aria-hidden="true">${meta.mark}</span><div class="space-head-mark" aria-hidden="true"><strong>${meta.mark}</strong></div><div class="space-head-copy"><h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="space-head-side"><small class="space-head-note">${meta.note}</small>${action?`<div class="space-head-action">${action}</div>`:''}</div></header>`}
 
 function stageProgress(){const start=isoDate(state.stage.startDate),current=isoDate(today()),day=Math.max(1,Math.floor((current-start)/86400000)+1),days=Number(state.stage.days||90);return{day:Math.min(day,days),days,pct:Math.min(100,Math.max(0,day/days*100))}}
 function calendarHtml(){const selected=/^\d{4}-\d{2}$/.test(state.calendarMonth)?state.calendarMonth:today().slice(0,7),[year,month]=selected.split('-').map(Number),first=new Date(Date.UTC(year,month-1,1,12)),last=new Date(Date.UTC(year,month,0,12)),lead=(first.getUTCDay()+6)%7;let days='';for(let i=0;i<lead;i++)days+='<span aria-hidden="true"></span>';for(let d=1;d<=last.getUTCDate();d++){const p=`${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`,r=state.records.find(x=>x.type==='daily'&&x.period===p),cls=[p===today()?'today':'',r?.status==='draft'?'draft':r?'completed':''].filter(Boolean).join(' '),action=r?`data-calendar-record="${esc(r.id)}"`:p===today()?`data-calendar="${p}"`:'disabled aria-disabled="true"';days+=`<button class="cal-day ${cls}" ${action} aria-label="${formatDate(p)}${r?`，${STATUS[r.status]}`:p===today()?'，填写今日复盘':'，无记录'}">${d}</button>`}return `<div class="calendar-head"><button class="icon-btn" type="button" data-calendar-shift="-1" aria-label="上个月"><span class="chevron-icon left" aria-hidden="true"></span></button><strong>${year} 年 ${month} 月</strong><button class="icon-btn" type="button" data-calendar-shift="1" aria-label="下个月"><span class="chevron-icon right" aria-hidden="true"></span></button></div><div class="cal-grid">${['一','二','三','四','五','六','日'].map(x=>`<span class="dow">${x}</span>`).join('')}${days}</div>`}
 function rightRail(){const p=stageProgress(),pending=state.records.filter(r=>r.status==='completed').sort((a,b)=>String(a.data.verifyDate).localeCompare(String(b.data.verifyDate))).slice(0,2);return `<aside class="right-rail ${state.railOpen?'open':''}" id="right-rail">
-  <section class="card rail-card"><div class="stage-title"><span class="help">当前阶段</span><span class="badge">${p.day} / ${p.days} 天</span></div><b>${esc(state.stage.name)}</b><p>${esc(state.stage.focus)}</p><div class="progress"><i style="width:${p.pct}%"></i></div><button class="rail-link" data-go-settings="stage">编辑阶段设置</button></section>
+  <section class="card rail-card"><div class="stage-title"><span class="help">当前阶段</span><span class="badge">${p.day} / ${p.days} 天</span></div><b>${esc(state.stage.name)}</b><p>${esc(state.stage.focus)}</p><div class="progress"><i style="width:${p.pct}%"></i></div><button class="rail-link" data-modal="stage">编辑阶段设置</button></section>
   <section class="card rail-card" id="rail-calendar">${calendarHtml()}</section>
   <section class="card rail-card"><div class="stage-title"><h3>最近待验证</h3><span class="badge">${state.stats.pending} 项</span></div>${pending.length?pending.map(r=>`<button class="action-mini" data-open-action="${esc(r.id)}"><small><span>${esc(r.data.verifyDate||'未定日期')}</span><span>${esc(TYPES[r.type].label)}</span></small><p>${esc(r.data.action||'未填写行动')}</p></button>`).join(''):`<p>目前没有等待验证的行动。</p>`}</section>
 </aside>`}
@@ -339,24 +336,30 @@ function openDeleteUserModal(target){openModal(`<div class="modal-head"><div><h2
 function openUserModal(resetId=null){openModal(`<div class="modal-head"><div><h2>${resetId?'重置成员密码':'创建新账户'}</h2><p>${resetId?'该账户现有登录会立即失效，复盘数据会保留。':'管理员创建的账户可以直接登录。'}</p></div><button class="modal-close" data-close>×</button></div><form id="user-form">${resetId?'':`<div class="input-grid"><div class="field"><label>称呼</label><input name="displayName" required maxlength="32"></div><div class="field"><label>用户名</label><input name="username" required minlength="3" maxlength="32"></div></div>${state.user.role==='superadmin'?`<div class="field"><label>角色</label><select name="role"><option value="member">成员</option><option value="admin">管理员</option></select></div>`:''}`}<div class="field"><label>${resetId?'新密码':'初始密码'}</label><input name="password" type="password" required minlength="15" maxlength="128" autocomplete="new-password"></div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>取消</button><button class="btn btn-primary">确认</button></div></form>`);$('#user-form').addEventListener('submit',async e=>{e.preventDefault();try{const body=Object.fromEntries(new FormData(e.currentTarget));if(resetId)await request(`/api/admin/users/${resetId}`,{method:'PATCH',body:{password:body.password}});else await request('/api/admin/users',{method:'POST',body});closeModal();toast(resetId?'密码已重置':'账户已创建');renderUsers()}catch(err){toast(err.message,'error')}})}
 async function patchUser(id,body){try{await request(`/api/admin/users/${id}`,{method:'PATCH',body});toast('账户已更新');renderUsers()}catch(e){toast(e.message,'error')}}
 
-const SETTINGS_CATEGORIES = {
-  account:{mark:'安',label:'账户与安全',note:'密码与登录'},
-  appearance:{mark:'色',label:'主题外观',note:'配色与动态效果'},
-  stage:{mark:'阶',label:'阶段与内容',note:'目标与复盘问题'},
-  guide:{mark:'问',label:'使用指南',note:'记录与验证方法'}
-};
 function settingsGuideHtml(){return `<div class="guide-flow">${['定标','事实','差距','机制','改变','验证'].map((x,i)=>`<div class="guide-step"><b>${String(i+1).padStart(2,'0')}</b><span>${x}</span></div>`).join('')}</div><h3>不同周期分别解决什么问题？</h3><p>每日看行动，不超过 8 分钟；每周找重复出现的条件；每月只选一个瓶颈和一个小实验；90 天重新校准方向；年度看人生结构；重大决策留下当时依据，避免事后诸葛亮。</p><h3>阶段指标怎么写？</h3><p>指标要能在一天结束时明确判断，而不是“变得更好”。例如把“提升收入能力”写成“专注 60 分钟，形成一个可展示的具体输出”。达标线是最低有效行动，不是理想状态。</p><h3>怎样避免越复盘越自责？</h3><ul><li>先写摄像头能拍到的事实，再写自己的解释。</li><li>一次只调整一个最可能影响结果的条件。</li><li>状态差时降低动作门槛，不把休息等同于失败。</li><li>验证的是方法，不是证明自己好或不好。</li></ul><h3>重大决定怎么回看？</h3><p>把过程质量与结果好坏分开。好结果可能来自运气，坏结果也不一定说明当时的判断错误。回到当时真正掌握的信息、可选方案和风险边界，再决定保留什么。</p>`}
-function settingsPanel(section){
-  if(section==='account')return `<div class="settings-summary"><div class="settings-avatar" aria-hidden="true">${esc((state.user.displayName||state.user.username)[0])}</div><div><strong>${esc(state.user.displayName||state.user.username)}</strong><span>${esc(state.user.username)} · ${state.user.role==='superadmin'?'超级管理员':state.user.role==='admin'?'管理员':'成员'}</span></div></div><p class="settings-explain">在这里修改登录密码，或安全退出当前账户。退出前会检查是否有未保存的复盘。</p><button class="btn btn-primary" data-modal="account">管理账户与安全</button>`;
-  if(section==='appearance')return `<div class="settings-summary"><div class="settings-swatches" aria-hidden="true">${['primary','secondary','tertiary'].map(key=>`<i style="background:${esc(state.theme[key])}"></i>`).join('')}</div><div><strong>${esc(state.theme.preset||'自定义')}</strong><span>${state.theme.reduceMotion?'已减少动态效果':'使用标准动态效果'}</span></div></div><p class="settings-explain">选择页面配色，调整主色、辅助色与次色，也可以减少动态效果。</p><button class="btn btn-primary" data-modal="theme">调整主题外观</button>`;
-  if(section==='stage')return `<div class="settings-summary"><div class="settings-stage-mark" aria-hidden="true">阶</div><div><strong>${esc(state.stage.name)}</strong><span>${stageProgress().days} 天 · ${esc(state.stage.focus)}</span></div></div><p class="settings-explain">管理当前阶段的目标、行动基线，以及新建复盘时使用的问题文案。已锁定的记录不会改变。</p><button class="btn btn-primary" data-modal="stage">编辑阶段与内容</button>`;
-  return `<div class="settings-guide prose"><p>复盘不是审判自己，而是用证据改善下一次行动。</p>${settingsGuideHtml()}</div>`;
+function openGuide(){openModal(`<div class="modal-head"><div><h2>使用指南</h2><p>用事实改善下一次行动。</p></div><button class="modal-close" type="button" data-close>×</button></div><div class="prose guide-content">${settingsGuideHtml()}</div>`)}
+function openSettings(){
+  const items=[
+    ['account','账户与安全','修改密码、安全退出'],
+    ['theme','主题颜色','配色与动态效果'],
+    ['stage','阶段设置','目标与复盘问题'],
+    ['guide','使用指南','记录与验证方法']
+  ];
+  openModal(`<div class="modal-head"><div><h2>设置</h2><p>${esc(state.user.displayName||state.user.username)} · ${esc(state.user.username)}</p></div><button class="modal-close" type="button" data-close>×</button></div><div class="settings-menu">${items.map(([key,label,note])=>`<button class="settings-menu-item" type="button" data-settings-target="${key}"><span><strong>${label}</strong><small>${note}</small></span><span class="chevron-icon right" aria-hidden="true"></span></button>`).join('')}</div>`);
+  $$('[data-settings-target]').forEach(button=>button.addEventListener('click',()=>openSettingsTarget(button.dataset.settingsTarget)));
 }
-function renderSettings(section=state.settingsSection){
-  state.settingsSection=SETTINGS_CATEGORIES[section]?section:'account';
-  const active=SETTINGS_CATEGORIES[state.settingsSection];
-  shell(`${spacePageHead('settings',{title:'设置',description:'账户安全、主题外观、阶段内容和使用指南都在这里。'})}<div class="settings-layout"><nav class="card settings-categories" aria-label="设置分类">${Object.entries(SETTINGS_CATEGORIES).map(([key,item])=>`<button type="button" class="settings-category ${key===state.settingsSection?'active':''}" data-settings-section="${key}" aria-pressed="${key===state.settingsSection}"><span class="settings-category-mark" aria-hidden="true">${item.mark}</span><span><strong>${item.label}</strong><small>${item.note}</small></span></button>`).join('')}</nav><section class="card settings-panel" aria-labelledby="settings-section-title"><div class="settings-panel-head"><span class="settings-panel-mark" aria-hidden="true">${active.mark}</span><div><h2 id="settings-section-title">${active.label}</h2><p>${active.note}</p></div></div>${settingsPanel(state.settingsSection)}</section></div>`);
-  $$('[data-settings-section]').forEach(button=>button.addEventListener('click',()=>{const next=button.dataset.settingsSection;renderSettings(next);$(`[data-settings-section="${next}"]`)?.focus()}));
+function openSettingsTarget(target){
+  if(target==='account')openAccount();
+  else if(target==='theme')openTheme();
+  else if(target==='stage')openStage();
+  else if(target==='guide')openGuide();
+  else return;
+  const header=$('#modal-root .modal-head');
+  if(!header)return;
+  const back=document.createElement('button');
+  back.type='button';back.className='settings-back';back.textContent='← 返回设置';
+  header.before(back);
+  back.addEventListener('click',()=>{if(target==='theme')applyTheme(state.theme);openSettings()});
 }
 
 const ACTION_PROMPT_FIELDS = [
@@ -398,13 +401,13 @@ function bindCalendar(){
 function bindCommon(){
   $$('[data-nav]').forEach(b=>b.addEventListener('click',()=>attemptNavigate(()=>navigate(b.dataset.nav))));
   $$('[data-modal]').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.modal==='theme')openTheme();if(b.dataset.modal==='stage')openStage();if(b.dataset.modal==='account')openAccount()}));
-  $$('[data-go-settings]').forEach(b=>b.addEventListener('click',()=>attemptNavigate(()=>{state.route='settings';renderSettings(b.dataset.goSettings)})));
+  $('#settings-trigger')?.addEventListener('click',openSettings);
   $('#menu-toggle')?.addEventListener('click',e=>{const open=$('#sidebar').classList.toggle('open');$('#drawer-backdrop').classList.toggle('open',open);e.currentTarget.setAttribute('aria-expanded',String(open))});$('#drawer-backdrop')?.addEventListener('click',()=>{$('#sidebar').classList.remove('open');$('#drawer-backdrop').classList.remove('open');$('#menu-toggle')?.setAttribute('aria-expanded','false')});
   $('#rail-toggle')?.addEventListener('click',e=>{const open=$('#right-rail').classList.toggle('open');e.currentTarget.setAttribute('aria-expanded',String(open))});
   bindCalendar();
   bindActionButtons();
 }
-function navigate(route){if(route==='guide'){route='settings';state.settingsSection='guide'}state.route=route;state.navOpen=false;state.railOpen=false;if(TYPES[route])return renderReview(route,defaultPeriod(route),route==='decision');if(route==='history')return renderHistory();if(route==='actions')return renderActions();if(route==='backup')return renderBackup();if(route==='users')return renderUsers();if(route==='settings')return renderSettings();renderReview('daily')}
+function navigate(route){state.route=route;state.navOpen=false;state.railOpen=false;if(TYPES[route])return renderReview(route,defaultPeriod(route),route==='decision');if(route==='history')return renderHistory();if(route==='actions')return renderActions();if(route==='backup')return renderBackup();if(route==='users')return renderUsers();renderReview('daily')}
 async function refreshStats(){state.stats=await request('/api/stats')}
 async function refreshData(){const [me,rec,stats]=await Promise.all([request('/api/me'),request('/api/records'),request('/api/stats')]);state.user=me.user;state.stage=me.stage;state.theme=me.theme;state.records=rec.records;state.stats=stats;applyTheme(state.theme)}
 async function boot(user){state.user=user;$('#app').innerHTML=`<div class="auth-panel"><div class="auth-card"><div class="skeleton" style="height:30px;margin-bottom:14px"></div><div class="skeleton" style="height:180px"></div></div></div>`;try{await refreshData();navigate('daily')}catch(e){if(e.status===401)return init();$('#app').innerHTML=`<div class="auth-panel"><div class="auth-card"><h1>暂时无法打开复盘室</h1><p>${esc(e.message)}</p><button class="btn btn-primary" id="retry">重试</button></div></div>`;$('#retry').addEventListener('click',()=>boot(user))}}
