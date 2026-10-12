@@ -69,9 +69,7 @@ function templatesForRecord(record){
 }
 function currentTemplateSnapshot(type){return{version:1,review:clone(currentReviewTemplate(type)),action:clone(currentActionTemplate())}}
 
-const SIDEBAR_COLLAPSE_KEY='shendu.sidebarCollapsed';
-function savedSidebarCollapsed(){try{return localStorage.getItem(SIDEBAR_COLLAPSE_KEY)==='1'}catch{return false}}
-const state = { user:null, stage:null, theme:null, records:[], stats:{week:0,pending:0,total:0}, route:'daily', current:null, dirty:false, saving:false, navOpen:false, sidebarCollapsed:savedSidebarCollapsed(), railOpen:false, reauthOpen:false, calendarMonth:null };
+const state = { user:null, stage:null, theme:null, records:[], stats:{week:0,pending:0,total:0}, route:'daily', current:null, dirty:false, saving:false, navOpen:false, railOpen:false, reauthOpen:false, calendarMonth:null };
 let modalReturnFocus=null;
 async function request(path, options = {}) {
   const opts = { credentials:'same-origin', ...options, headers:{ ...(options.body && !(options.body instanceof Blob) && !(options.body instanceof ArrayBuffer) ? {'Content-Type':'application/json'} : {}), ...(options.headers||{}) } };
@@ -124,22 +122,22 @@ function renderAuth(info={}){
   $('#auth-switch')?.addEventListener('click',()=>renderAuth({...info,mode:info.mode==='register'?'login':'register'}));
 }
 
-function navItems(){return Object.entries(TYPES).filter(([k])=>k!=='quarterly'||state.stage.showQuarter).map(([k,v])=>`<button class="nav-item ${state.route===k?'active':''}" data-nav="${k}" aria-label="${esc(v.label)}" title="${esc(v.label)}">${navIcon(k)}<span class="nav-label">${v.label}</span><span class="nav-meta">${v.position}</span></button>`).join('')}
+function navItems(){return Object.entries(TYPES).filter(([k])=>k!=='quarterly'||state.stage.showQuarter).map(([k,v])=>`<button class="nav-item ${state.route===k?'active':''}" data-nav="${k}">${navIcon(k)}<span class="nav-label">${v.label}</span><span class="nav-meta">${v.position}</span></button>`).join('')}
 function sidebar(){return `<aside class="sidebar ${state.navOpen?'open':''}" id="sidebar">
-  <div class="side-brand"><div class="brand-row"><div class="seal">慎</div><div class="brand-name"><div class="brand-cn">慎獨</div><div class="brand-en">SHENDU JOURNAL</div></div></div><button class="sidebar-collapse" id="sidebar-collapse" type="button" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}" aria-label="${state.sidebarCollapsed?'展开侧栏':'收起侧栏'}" title="${state.sidebarCollapsed?'展开侧栏':'收起侧栏'}"><span class="chevron-icon ${state.sidebarCollapsed?'right':'left'}" aria-hidden="true"></span></button><p class="side-quote">“言寡尤，行寡悔，慎独存诚”</p></div>
+  <div class="side-brand"><div class="brand-row"><div class="seal">慎</div><div><div class="brand-cn">慎獨</div><div class="brand-en">SHENDU JOURNAL</div></div></div><p class="side-quote">“言寡尤，行寡悔，慎独存诚”</p></div>
   <div class="nav-group"><div class="nav-caption">记录与复盘</div>${navItems()}</div>
   <div class="nav-group"><div class="nav-caption">我的空间</div>
-    <button class="nav-item ${state.route==='history'?'active':''}" data-nav="history" aria-label="历史复盘" title="历史复盘">${navIcon('history')}<span>历史复盘</span></button>
-    <button class="nav-item ${state.route==='actions'?'active':''}" data-nav="actions" aria-label="${esc(currentActionTemplate().pageTitle)}，${state.stats.pending} 项待验证" title="${esc(currentActionTemplate().pageTitle)}">${navIcon('actions')}<span>${esc(currentActionTemplate().pageTitle)}</span><span class="nav-badge">${state.stats.pending}</span></button>
-    <button class="nav-item ${state.route==='backup'?'active':''}" data-nav="backup" aria-label="数据备份" title="数据备份">${navIcon('backup')}<span>数据备份</span><span class="nav-meta">.shendu</span></button>
-    ${['admin','superadmin'].includes(state.user.role)?`<button class="nav-item ${state.route==='users'?'active':''}" data-nav="users" aria-label="账户管理" title="账户管理">${navIcon('users')}<span>账户管理</span></button>`:''}
+    <button class="nav-item ${state.route==='history'?'active':''}" data-nav="history">${navIcon('history')}<span>历史复盘</span></button>
+    <button class="nav-item ${state.route==='actions'?'active':''}" data-nav="actions">${navIcon('actions')}<span>${esc(currentActionTemplate().pageTitle)}</span><span class="nav-badge">${state.stats.pending}</span></button>
+    <button class="nav-item ${state.route==='backup'?'active':''}" data-nav="backup">${navIcon('backup')}<span>数据备份</span><span class="nav-meta">.shendu</span></button>
+    ${['admin','superadmin'].includes(state.user.role)?`<button class="nav-item ${state.route==='users'?'active':''}" data-nav="users">${navIcon('users')}<span>账户管理</span></button>`:''}
   </div><div class="side-spacer"></div>
-  <div class="side-tools"><button class="nav-item" data-modal="theme" aria-label="主题颜色" title="主题颜色">${navIcon('theme')}<span>主题颜色</span><span class="nav-meta">● ● ●</span></button><button class="nav-item" data-modal="stage" aria-label="阶段设置" title="阶段设置">${navIcon('stage')}<span>阶段设置</span></button><button class="nav-item" data-nav="guide" aria-label="使用指南" title="使用指南">${navIcon('guide')}<span>使用指南</span></button></div>
+  <div class="side-tools"><button class="nav-item" data-modal="theme">${navIcon('theme')}<span>主题颜色</span><span class="nav-meta">● ● ●</span></button><button class="nav-item" data-modal="stage">${navIcon('stage')}<span>阶段设置</span></button><button class="nav-item" data-nav="guide">${navIcon('guide')}<span>使用指南</span></button></div>
   <div class="side-user"><div class="user-row"><div class="avatar"><span>${esc((state.user.displayName||state.user.username)[0])}</span></div><div class="user-copy"><strong>${esc(state.user.displayName||state.user.username)}</strong><small>${state.user.role==='superadmin'?'超级管理员':state.user.role==='admin'?'管理员':'成员'}</small></div><button class="icon-btn" data-modal="account" title="账户设置" aria-label="打开账户设置"><span class="chevron-icon down" aria-hidden="true"></span></button></div></div>
 </aside><div class="drawer-backdrop ${state.navOpen?'open':''}" id="drawer-backdrop"></div>`}
 
 function topbar(){const isType=TYPES[state.route],routeLabels={history:'历史复盘',actions:currentActionTemplate().pageTitle,backup:'数据备份',users:'账户管理',guide:'使用指南'};return `<header class="topbar"><div class="crumb"><button class="mobile-menu" id="menu-toggle" type="button" data-route-icon="${state.route}" aria-label="打开目录" aria-controls="sidebar" aria-expanded="false">${navIcon(state.route)}</button><strong>${esc(isType?isType.label:(routeLabels[state.route]||'慎独'))}</strong><span>/</span><span>${formatDate(today())} · ${esc(state.stage.name)}阶段</span></div><div style="display:flex;gap:8px"><button class="btn btn-ghost mobile-rail-toggle" id="rail-toggle" aria-controls="right-rail" aria-expanded="false">阶段与日历</button><div class="privacy-pill"><i></i><span>私人复盘空间</span></div></div></header>`}
-function shell(content){$('#app').innerHTML=`<div class="app-shell ${state.sidebarCollapsed?'sidebar-collapsed':''}">${sidebar()}${topbar()}<div class="workspace"><main class="main">${content}</main>${rightRail()}</div></div>`;bindCommon()}
+function shell(content){$('#app').innerHTML=`<div class="app-shell">${sidebar()}${topbar()}<div class="workspace"><main class="main">${content}</main>${rightRail()}</div></div>`;bindCommon()}
 
 const SPACE_PAGE_META = {
   history:{mark:'册',note:'循迹 · 归档有序'},
@@ -380,7 +378,6 @@ function bindCalendar(){
 function bindCommon(){
   $$('[data-nav]').forEach(b=>b.addEventListener('click',()=>attemptNavigate(()=>navigate(b.dataset.nav))));
   $$('[data-modal]').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.modal==='theme')openTheme();if(b.dataset.modal==='stage')openStage();if(b.dataset.modal==='account')openAccount()}));
-  $('#sidebar-collapse')?.addEventListener('click',e=>{state.sidebarCollapsed=!state.sidebarCollapsed;$('.app-shell').classList.toggle('sidebar-collapsed',state.sidebarCollapsed);const label=state.sidebarCollapsed?'展开侧栏':'收起侧栏';e.currentTarget.setAttribute('aria-expanded',String(!state.sidebarCollapsed));e.currentTarget.setAttribute('aria-label',label);e.currentTarget.title=label;e.currentTarget.querySelector('span').className=`chevron-icon ${state.sidebarCollapsed?'right':'left'}`;try{localStorage.setItem(SIDEBAR_COLLAPSE_KEY,state.sidebarCollapsed?'1':'0')}catch{}});
   $('#menu-toggle')?.addEventListener('click',e=>{const open=$('#sidebar').classList.toggle('open');$('#drawer-backdrop').classList.toggle('open',open);e.currentTarget.setAttribute('aria-expanded',String(open))});$('#drawer-backdrop')?.addEventListener('click',()=>{$('#sidebar').classList.remove('open');$('#drawer-backdrop').classList.remove('open');$('#menu-toggle')?.setAttribute('aria-expanded','false')});
   $('#rail-toggle')?.addEventListener('click',e=>{const open=$('#right-rail').classList.toggle('open');e.currentTarget.setAttribute('aria-expanded',String(open))});
   bindCalendar();
