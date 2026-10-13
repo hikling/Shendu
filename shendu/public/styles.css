@@ -505,10 +505,6 @@ body.reduce-motion *,body.reduce-motion *:before,body.reduce-motion *:after{anim
 .action-card .action-detail-head h3{color:var(--ink-2);font-size:.72rem;font-weight:600;letter-spacing:.02em;overflow-wrap:anywhere}
 .action-card .action-detail>p{margin:12px 0 0;font-size:.85rem;line-height:1.85}
 .action-card .promise-detail>p{font-size:.96rem;font-weight:500;line-height:1.85}
-.action-card .if-then-readonly{gap:10px;margin-top:12px}
-.action-card .if-then-readonly>div{grid-template-columns:44px minmax(0,1fr);gap:12px}
-.action-card .if-then-readonly b{justify-content:start;min-width:0;min-height:0;border-radius:0;background:transparent;font-size:.71rem;line-height:1.8;overflow-wrap:anywhere}
-.action-card .if-then-readonly span{padding:0;font-size:.82rem;line-height:1.8}
 .action-card .action-result-part{margin-top:22px;padding-top:20px}
 .action-card .action-result-part .action-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 .action-card .action-card-footer{margin-top:20px;padding-top:16px}
