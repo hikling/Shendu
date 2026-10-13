@@ -479,3 +479,52 @@ body.reduce-motion *,body.reduce-motion *:before,body.reduce-motion *:after{anim
 .settings-back:hover{text-decoration:underline}
 .guide-content{max-width:100%}
 @media(max-width:520px){.guide-content .guide-flow{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Action-list cards only: shared review-detail styles retain their original layout. */
+.action-card{padding:24px 26px;box-shadow:0 12px 30px -22px #231c1433,inset 0 1px #fff}
+.action-card>.section-head{align-items:flex-start;gap:18px;margin:0;padding-bottom:18px;border-bottom:0}
+.action-card>.section-head>div{min-width:0}
+.action-card .list-type{font-size:.68rem;letter-spacing:.04em}
+.action-card>.section-head h2{margin:7px 0 0;font-size:1.12rem;line-height:1.55;overflow-wrap:anywhere}
+.action-card>.section-head>.badge{flex:0 0 auto;max-width:45%;margin-top:3px;white-space:normal;overflow-wrap:anywhere;line-height:1.5;text-align:center}
+.action-card .verification-times{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 30px;margin:0 0 20px;padding:13px 0 18px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.action-card .verification-times>div{display:grid;flex:1 1 180px;gap:5px;min-width:0;min-height:0;padding:0;border:0;border-radius:0;background:transparent}
+.action-card .verification-times small{min-width:0;font-size:.66rem;letter-spacing:0;overflow-wrap:anywhere}
+.action-card .verification-times strong{font-size:.78rem;font-weight:600;line-height:1.6;overflow-wrap:anywhere}
+.action-card .verification-times>.badge{align-self:center;max-width:100%;margin-left:auto;white-space:normal;overflow-wrap:anywhere}
+.action-card .action-part-heading{align-items:baseline;flex-wrap:wrap;gap:6px 16px;margin:0 0 16px}
+.action-card .action-part-heading>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 12px;min-width:0}
+.action-card .action-part-heading span{max-width:100%;font-size:.66rem;letter-spacing:.08em;overflow-wrap:anywhere}
+.action-card .action-part-heading h3{font-size:.78rem;font-weight:600;letter-spacing:0;color:var(--ink-2);overflow-wrap:anywhere}
+.action-card .action-part-heading small{min-width:0;max-width:100%;font-size:.66rem;white-space:normal;overflow-wrap:anywhere}
+.action-card .action-detail-grid{grid-template-columns:1fr;gap:16px}
+.action-card .action-detail{min-height:0;padding:17px 18px;border:0;border-radius:14px;background:var(--surface);box-shadow:none}
+.action-card .promise-detail{padding:0;background:transparent}
+.action-card .action-detail-head{gap:0;padding:0;border:0}
+.action-card .action-detail-head>span{display:none}
+.action-card .action-detail-head h3{color:var(--ink-2);font-size:.72rem;font-weight:600;letter-spacing:.02em;overflow-wrap:anywhere}
+.action-card .action-detail>p{margin:12px 0 0;font-size:.85rem;line-height:1.85}
+.action-card .promise-detail>p{font-size:.96rem;font-weight:500;line-height:1.85}
+.action-card .if-then-readonly{gap:10px;margin-top:12px}
+.action-card .if-then-readonly>div{grid-template-columns:44px minmax(0,1fr);gap:12px}
+.action-card .if-then-readonly b{justify-content:start;min-width:0;min-height:0;border-radius:0;background:transparent;font-size:.71rem;line-height:1.8;overflow-wrap:anywhere}
+.action-card .if-then-readonly span{padding:0;font-size:.82rem;line-height:1.8}
+.action-card .action-result-part{margin-top:22px;padding-top:20px}
+.action-card .action-result-part .action-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.action-card .action-card-footer{margin-top:20px;padding-top:16px}
+.action-card .action-card-footer .btn{max-width:100%;min-height:44px;padding:10px 18px;border-radius:12px;box-shadow:none;white-space:normal;overflow-wrap:anywhere;text-align:center}
+@media(max-width:620px){
+  .action-card{padding:20px}
+  .action-card>.section-head{gap:12px;padding-bottom:16px}
+  .action-card>.section-head h2{font-size:1.02rem}
+  .action-card>.section-head>.badge{max-width:45%;white-space:normal;text-align:center;line-height:1.5}
+  .action-card .verification-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px;margin-bottom:18px;padding:13px 0 16px}
+  .action-card .verification-times>.badge{grid-column:1/-1;justify-self:start;margin-left:0}
+  .action-card .action-part-heading{margin-bottom:12px}
+  .action-card .action-detail-grid{grid-template-columns:1fr;gap:14px}
+  .action-card .action-result-part .action-detail-grid{grid-template-columns:1fr}
+  .action-card .action-detail{padding:16px}
+  .action-card .promise-detail{padding:4px 0 8px}
+  .action-card .action-part-heading small{text-align:left}
+  .action-card .action-card-footer .btn{width:100%}
+}
