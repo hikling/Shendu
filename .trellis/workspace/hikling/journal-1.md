@@ -40,3 +40,25 @@
 ### Next Steps
 
 - 审查并合并 PR #15，服务器按更新脚本从 main 升级
+
+
+## Session 2: 恢复原版界面
+<!-- trellis-session: v=2 fp=e655cc198f5c692e -->
+
+**Date**: 2026-10-23
+**Task**: 恢复原版界面
+**Branch**: `codex/restore-original-ui`
+
+### Summary
+
+将 PR #15 的前端 UI 恢复到合并前版本，移除被否决的设计说明；保留 Trellis 和其他已合并改动。验证文件逐字节一致、npm run check 与 git diff --check。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5756981` | revert: restore original Shendu interface |
+
+### Status
+
+[OK] **Completed**
