@@ -1,0 +1,30 @@
+{
+  "id": "ui-daily-review",
+  "name": "ui-daily-review",
+  "title": "重构公共导航与每日复盘界面",
+  "description": "用克制的玻璃视觉和聚焦式书写流程降低首屏信息负担，保留现有数据行为",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "hikling",
+  "assignee": "hikling",
+  "createdAt": "2026-10-23",
+  "completedAt": "2026-10-23",
+  "branch": "codex/ui-daily-review",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "23a2834ebd14ff016abd106d9c57c7cb87163f67",
+  "pr_url": "https://github.com/hikling/Shendu/pull/15",
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "shendu/public/app.js",
+    "shendu/public/styles.css",
+    "shendu/public/index.html"
+  ],
+  "notes": "Approved for implementation. Formal Git checkout restored at e24da0371b4b08701137744db6ac677391667e3f; Trellis planning copied into it.",
+  "meta": {}
+}
