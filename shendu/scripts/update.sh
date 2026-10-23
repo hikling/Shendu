@@ -78,10 +78,10 @@ command -v docker >/dev/null 2>&1 || fail "没有找到 Docker。请重新运行
 docker compose version >/dev/null 2>&1 || fail "没有找到 Docker Compose v2 插件。"
 
 cd "$app_dir"
-echo "[1/6] 校验 Compose 与本机配置……"
+echo "[1/7] 校验 Compose 与本机配置……"
 docker compose config >/dev/null
 
-echo "[2/6] 选择是否创建更新前整站备份……"
+echo "[2/7] 选择是否创建更新前整站备份……"
 backup_choice="${SHENDU_BACKUP_BEFORE_UPDATE:-}"
 if [ -z "$backup_choice" ]; then
   if [ -t 0 ]; then
@@ -132,7 +132,7 @@ case "$backup_choice" in
 esac
 
 old_commit="$(git_in_repo rev-parse --short HEAD)"
-echo "[3/6] 拉取 GitHub main 分支……"
+echo "[3/7] 拉取 GitHub main 分支……"
 git_in_repo fetch --prune origin main
 git_in_repo merge --ff-only origin/main
 new_commit="$(git_in_repo rev-parse --short HEAD)"
@@ -142,13 +142,16 @@ if [ "${SHENDU_UPDATE_GIT_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-echo "[4/6] 用新版代码再次校验 Compose……"
+echo "[4/7] 用新版代码再次校验 Compose……"
 docker compose config >/dev/null
 
-echo "[5/6] 构建新版应用镜像（当前网站继续运行）……"
+echo "[5/7] 拉取新版 Caddy 镜像（当前网站继续运行）……"
+docker compose pull caddy
+
+echo "[6/7] 构建新版应用镜像（当前网站继续运行）……"
 docker compose build --pull shendu
 
-echo "[6/6] 启动新版应用并等待健康检查……"
+echo "[7/7] 启动新版应用并等待健康检查……"
 docker compose up -d --no-deps shendu
 attempt=0
 health=""
