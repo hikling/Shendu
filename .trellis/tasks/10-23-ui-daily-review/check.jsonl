@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend quality checklist"}
+{"file":".trellis/spec/frontend/state-and-data.md","reason":"Verify unsaved input and record lifecycle"}
+{"file":".trellis/spec/frontend/ui-quality.md","reason":"Verify themes, responsive states, and accessibility"}
+{"file":".trellis/spec/backend/http-and-security.md","reason":"Check preserved API and status boundaries"}
+{"file":".trellis/tasks/10-23-ui-daily-review/research/current-ui-audit.md","reason":"Compare changes with source baseline"}

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend pre-development and quality checklist"}
+{"file":".trellis/spec/frontend/architecture.md","reason":"Existing render and event-binding boundaries"}
+{"file":".trellis/spec/frontend/state-and-data.md","reason":"Draft, dirty state, save, and period contracts"}
+{"file":".trellis/spec/frontend/ui-quality.md","reason":"Themes, responsive behavior, and accessibility"}
+{"file":".trellis/spec/backend/http-and-security.md","reason":"Preserve existing record API and lifecycle guarantees"}
+{"file":".trellis/tasks/10-23-ui-daily-review/research/current-ui-audit.md","reason":"Source anchors and density problem"}
